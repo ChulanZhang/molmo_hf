@@ -6,7 +6,7 @@ __pycache__/
 # Data & Models (不要传到 GitHub)
 checkpoints/
 results/
-data/
+
 *.bin
 *.pt
 *.pth

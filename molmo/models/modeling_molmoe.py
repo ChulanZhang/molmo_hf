@@ -4,7 +4,7 @@ Adapted from
 [minGPT](https://github.com/karpathy/minGPT.git)
 """
 
-from __future__ import annotations
+# from __future__ import annotations  # Not supported in Python 3.6, but works in Python 3.12
 
 import logging
 import math
@@ -37,7 +37,7 @@ import torch.nn.functional as F
 from torch import einsum
 import einops
 from transformers import PreTrainedModel, GenerationConfig, Cache
-from transformers.modeling_outputs import CausalLMOutputWithPast
+from transformers.modeling_outputs import CausalLMOutputWithPast, ModelOutput
 
 from .config_molmoe import (
     ActivationType,
@@ -48,6 +48,7 @@ from .config_molmoe import (
     ImageProjectType, 
     AttentionType,
 )
+from ..aliases import PathOrStr
 
 
 from .config_molmoe import (
@@ -342,9 +343,11 @@ class RotaryEmbedding(nn.Module):
         )
 
     def get_rotary_embedding(self, seq_len: int, device: torch.device) -> Tuple[torch.Tensor, torch.Tensor]:
+        pos_sin = self.__cache.get("rope_pos_sin")
+        pos_cos = self.__cache.get("rope_pos_cos")
         if (
-            (pos_sin := self.__cache.get("rope_pos_sin")) is not None
-            and (pos_cos := self.__cache.get("rope_pos_cos")) is not None
+            pos_sin is not None
+            and pos_cos is not None
             and pos_sin.shape[-2] >= seq_len
             and pos_cos.shape[-2] >= seq_len
         ):
@@ -498,7 +501,8 @@ def causal_attention_bias(seq_len: int, device: torch.device) -> torch.FloatTens
 
 
 def get_causal_attention_bias(cache: BufferCache, seq_len: int, device: torch.device) -> torch.Tensor:
-    if (causal_bias := cache.get("causal_attention_bias")) is not None and causal_bias.shape[-1] >= seq_len:
+    causal_bias = cache.get("causal_attention_bias")
+    if causal_bias is not None and causal_bias.shape[-1] >= seq_len:
         if causal_bias.device != device:
             causal_bias = causal_bias.to(device)
             cache["causal_attention_bias"] = causal_bias
@@ -2047,7 +2051,7 @@ class MolmoModel(MolmoPretrainedModel):
                 if output_hidden_states else None
             )
 
-    def num_params(self, include_embedding: bool = True) -> int:
+    def num_params(self, include_embedding: bool = True, include_inactive_params: bool = True) -> int:
         """
         Get the total number of parameters.
         """
@@ -2057,13 +2061,120 @@ class MolmoModel(MolmoPretrainedModel):
                 lambda np: ".wte." not in np[0] and ".wpe." not in np[0],
                 params,
             )
+        if not include_inactive_params:
+            # For MoE models, need to reduce blocks to the number of experts that are selected
+            # This is a simplified version - full implementation would need to handle MoE-specific logic
+            pass  # TODO: Implement MoE inactive params filtering if needed
         return sum(p.numel() for _, p in params)
+
+    @staticmethod
+    def get_connector_parameters():
+        """Get parameter names for the connector (vision-to-LLM bridge)."""
+        return tuple([
+            "vision_backbone.image_pooling_2d",
+            "vision_backbone.image_projector",
+            "vision_backbone.cls_projector",
+            "vision_backbone.pad_embed",
+            "transformer.wte.new_embedding",
+        ])
+
+    @staticmethod
+    def get_vit_parameters():
+        """Get parameter names for the vision transformer."""
+        return tuple([
+            "vision_backbone.image_vit",
+        ])
+
+    @staticmethod
+    def get_llm_parameters():
+        """Get parameter names for the LLM (language model)."""
+        return tuple([
+            "transformer.wte.embedding", "transformer.wte.weight", "transformer.wpe",
+            "transformer.blocks", "transformer.block_groups",
+            "transformer.ln_f", "transformer.ff_out",
+        ])
+
+    def set_activation_checkpointing(self, strategy):
+        """
+        Set activation checkpointing strategy for the model.
+        
+        Args:
+            strategy: ActivationCheckpointingStrategy or None
+        """
+        from molmo.config import ActivationCheckpointingStrategy
+        
+        self.activation_checkpointing_strategy = strategy
+        if strategy is None:
+            return
+            
+        # Set activation checkpointing for blocks
+        for block in self.transformer.blocks:
+            if hasattr(block, 'set_activation_checkpointing'):
+                block.set_activation_checkpointing(strategy)
+        
+        # Set activation checkpointing for vision backbone
+        if self.vision_backbone is not None:
+            if hasattr(self.vision_backbone, 'set_activation_checkpointing'):
+                self.vision_backbone.set_activation_checkpointing(strategy)
+            elif hasattr(self.vision_backbone, 'image_vit'):
+                if hasattr(self.vision_backbone.image_vit, 'set_grad_checkpointing'):
+                    # For vision backbone, use grad checkpointing
+                    enable = strategy is not None
+                    self.vision_backbone.image_vit.set_grad_checkpointing(enable)
+
+    def reset_with_pretrained_weights(self):
+        """
+        Reset model parameters with pretrained weights.
+        This will reset vision backbone if present, and LLM parameters.
+        """
+        if self.vision_backbone is not None:
+            if hasattr(self.vision_backbone, 'reset_with_pretrained_weights'):
+                self.vision_backbone.reset_with_pretrained_weights()
+            else:
+                self.vision_backbone.reset_parameters()
+        
+        # Reset LLM parameters (non-vision)
+        # Note: This is a simplified version - full implementation would need
+        # to handle specific initialization logic
+        for block in self.transformer.blocks:
+            if hasattr(block, 'reset_parameters'):
+                block.reset_parameters()
+
+    def get_fsdp_wrap_policy(self, wrap_strategy=None):
+        """
+        Get FSDP wrap policy for the model.
+        
+        Args:
+            wrap_strategy: FSDPWrapStrategy or None
+            
+        Returns:
+            Wrap policy function or None
+        """
+        from molmo.config import FSDPWrapStrategy
+        
+        if wrap_strategy is None:
+            return None
+        
+        # Simplified FSDP wrap policy - wrap by block
+        # Full implementation would need to handle different strategies
+        def fsdp_wrap_fn(module, recurse: bool = True, nonwrapped_numel: int = 0):
+            # Wrap MolmoDecoderLayer blocks
+            if isinstance(module, MolmoDecoderLayer):
+                return True
+            # Wrap vision backbone if present
+            if self.vision_backbone is not None and module is self.vision_backbone:
+                return True
+            if recurse:
+                return True
+            return False
+        
+        return fsdp_wrap_fn
 
     @classmethod
     def from_checkpoint(
         cls, checkpoint_dir: PathOrStr, device: str = "cpu",
-        checkpoint_type: Optional[CheckpointType] = None
-    ) -> OLMo:
+        checkpoint_type: Optional[Any] = None
+    ) -> "MolmoModel":
         """
         Load an OLMo model from a checkpoint.
         """
@@ -2089,7 +2200,8 @@ class MolmoModel(MolmoPretrainedModel):
         # not wrapped in FSDP. And when the model is wrapped in FSDP, loading this state dict will still work
         # fine without the prefixes. This also simplifies the other steps below.
         for key in list(state_dict.keys()):
-            state_dict[(new_key := key.replace("_fsdp_wrapped_module.", ""))] = state_dict.pop(key)
+            new_key = key.replace("_fsdp_wrapped_module.", "")
+            state_dict[new_key] = state_dict.pop(key)
             new_keys_to_og_keys[new_key] = key
 
         # For backwards compatibility prior to fixing https://github.com/allenai/LLM/issues/222
@@ -2097,16 +2209,20 @@ class MolmoModel(MolmoPretrainedModel):
             for key in list(state_dict.keys()):
                 if fnmatch(key, "transformer.*.norm.weight"):
                     tensor = state_dict.pop(key)
-                    state_dict[(new_key := key.replace("norm.weight", "attn_norm.weight"))] = tensor
+                    new_key = key.replace("norm.weight", "attn_norm.weight")
+                    state_dict[new_key] = tensor
                     new_keys_to_og_keys[new_key] = new_keys_to_og_keys[key]
-                    state_dict[(new_key := key.replace("norm.weight", "ff_norm.weight"))] = tensor.clone()
+                    new_key = key.replace("norm.weight", "ff_norm.weight")
+                    state_dict[new_key] = tensor.clone()
                     new_keys_to_og_keys[new_key] = new_keys_to_og_keys[key]
                     del new_keys_to_og_keys[key]
                 elif fnmatch(key, "transformer.*.norm.bias"):
                     tensor = state_dict.pop(key)
-                    state_dict[(new_key := key.replace("norm.bias", "attn_norm.bias"))] = tensor
+                    new_key = key.replace("norm.bias", "attn_norm.bias")
+                    state_dict[new_key] = tensor
                     new_keys_to_og_keys[new_key] = new_keys_to_og_keys[key]
-                    state_dict[(new_key := key.replace("norm.bias", "ff_norm.bias"))] = tensor.clone()
+                    new_key = key.replace("norm.bias", "ff_norm.bias")
+                    state_dict[new_key] = tensor.clone()
                     new_keys_to_og_keys[new_key] = new_keys_to_og_keys[key]
                     del new_keys_to_og_keys[key]
 
@@ -2126,34 +2242,30 @@ class MolmoModel(MolmoPretrainedModel):
             # and then (re-)group them into the right block sizes.
             if state_dict_block_group_size > 1:
                 for key in list(state_dict.keys()):
-                    if (m := re.match(r"transformer.block_groups\.(\d+)\.(\d+)\..*", key)) is not None:
+                    m = re.match(r"transformer.block_groups\.(\d+)\.(\d+)\..*", key)
+                    if m is not None:
                         group_idx, group_block_idx = int(m.group(1)), int(m.group(2))
                         block_idx = (group_idx * state_dict_block_group_size) + group_block_idx
-                        state_dict[
-                            (
-                                new_key := key.replace(
-                                    f"block_groups.{group_idx}.{group_block_idx}.", f"blocks.{block_idx}."
-                                )
-                            )
-                        ] = state_dict.pop(key)
+                        new_key = key.replace(
+                            f"block_groups.{group_idx}.{group_block_idx}.", f"blocks.{block_idx}."
+                        )
+                        state_dict[new_key] = state_dict.pop(key)
                         new_keys_to_og_keys[new_key] = new_keys_to_og_keys.pop(key)
 
             if self.config.block_group_size > 1:
                 # Group the state dict blocks into the right block size.
                 for key in list(state_dict.keys()):
-                    if (m := re.match(r"transformer.blocks\.(\d+)\..*", key)) is not None:
+                    m = re.match(r"transformer.blocks\.(\d+)\..*", key)
+                    if m is not None:
                         block_idx = int(m.group(1))
                         group_idx, group_block_idx = (
                             block_idx // self.config.block_group_size,
                             block_idx % self.config.block_group_size,
                         )
-                        state_dict[
-                            (
-                                new_key := key.replace(
-                                    f"blocks.{block_idx}.", f"block_groups.{group_idx}.{group_block_idx}."
-                                )
-                            )
-                        ] = state_dict.pop(key)
+                        new_key = key.replace(
+                            f"blocks.{block_idx}.", f"block_groups.{group_idx}.{group_block_idx}."
+                        )
+                        state_dict[new_key] = state_dict.pop(key)
                         new_keys_to_og_keys[new_key] = new_keys_to_og_keys.pop(key)
 
         og_keys_to_new: Dict[str, Set[str]] = defaultdict(set)

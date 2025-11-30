@@ -23,6 +23,13 @@ from molmo.models.config_molmoe import MolmoConfig
 from molmo.preprocessors.preprocessing_molmo import MolmoProcessor
 from molmo.preprocessors.image_preprocessing_molmo import MolmoImageProcessor
 
+# New Data Loading Imports
+from molmo.data import get_dataset_by_name
+from molmo.data.model_preprocessor import MultiModalPreprocessor, Preprocessor
+from molmo.data.data_formatter import DataFormatter
+from molmo.data.collator import MMCollator
+from molmo.data.dataset import DeterministicDataset
+
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
@@ -187,53 +194,95 @@ class BaseExperiment(ABC):
     ) -> DataLoader:
         """Build a dataloader for the given dataset."""
         with Timer(f"Building dataloader for {dataset_name}/{split}"):
-            # Since original data loading code is missing in this HF port,
-            # we implement a fallback using our local MolmoProcessor and dummy/sample data.
-            # In a real scenario, you would implement a proper Dataset class here.
+            # 1. Get Dataset
+            try:
+                dataset = get_dataset_by_name(dataset_name, split=split)
+            except NotImplementedError:
+                log.warning(f"Dataset {dataset_name} not found in academic_datasets. Using dummy fallback.")
+                return self._build_dummy_dataloader(batch_size, max_steps)
+            except Exception as e:
+                log.warning(f"Error loading dataset {dataset_name}: {e}. Using dummy fallback.")
+                return self._build_dummy_dataloader(batch_size, max_steps)
+
+            # 2. Create Preprocessor
+            # Only specify parameters that differ from MultiModalPreprocessor defaults
+            mm_preprocessor = MultiModalPreprocessor(
+                tokenizer=self.tokenizer,
+                crop_mode=self.model.config.crop_mode,  # "overlap-and-resize-c2" != default "resize"
+                max_crops=self.model.config.max_crops,  # 12 != default 6
+                overlap_margins=self.model.config.overlap_margins,  # Good practice to be explicit
+                image_padding_mask=bool(self.model.config.image_padding_embed),  # True != default False
+            )
             
-            log.info("Using fallback dummy data generator with MolmoProcessor.")
+            # Create DataFormatter
+            formatter = DataFormatter(
+                prompt_templates=self.model.config.prompt_type,
+                message_format=self.model.config.message_formatting,
+                system_prompt=self.model.config.system_prompt_kind,
+                always_start_with_space=self.model.config.always_start_with_space,
+            )
             
-            # Create a dummy batch
-            image = Image.new('RGB', (336, 336), color='blue')
-            text = "Describe this image."
+            # Create Preprocessor wrapper
+            preprocessor = Preprocessor(
+                formater=formatter,
+                mm_preprocessor=mm_preprocessor,
+            )
             
-            # Use self.processor (MolmoProcessor)
-            inputs = self.processor.process(text=text, images=image)
+            # 3. Wrap in DeterministicDataset
+            # seed=42 is hardcoded for reproducibility in motivation experiments
+            det_dataset = DeterministicDataset(dataset, preprocessor, seed=42)
             
-            # Convert to tensors (MolmoProcessor returns dict of numpy/list, need to ensure torch tensors)
-            # Actually MolmoProcessor.process returns a dict where values are already torch tensors or numpy arrays
-            # Let's ensure they are tensors and have batch dim
-            batch = {}
-            for k, v in inputs.items():
-                if isinstance(v, (list, np.ndarray)):
-                    v = torch.tensor(v)
-                if isinstance(v, torch.Tensor):
-                    if v.ndim == 1 and k != "image_input_idx": 
-                         v = v.unsqueeze(0)
-                    elif k == "images" and v.ndim == 3:
-                         v = v.unsqueeze(0)
-                    elif k == "image_input_idx":
-                         # image_input_idx from processor is (num_crops, num_patches)
-                         # Model expects (batch_size, num_crops, num_patches)
-                         if v.ndim == 2:
-                             v = v.unsqueeze(0)
-                    elif k == "image_masks":
-                         # image_masks from processor is (num_crops, num_patches)
-                         # Model expects (batch_size, num_crops, num_patches) ??
-                         # Let's check modeling_molmoe.py for image_masks usage
-                         # It is passed to vision_backbone(images, image_masks)
-                         # vision_backbone expects (batch_size*num_crops, ...) or (batch_size, num_crops, ...)
-                         # Usually it handles batch dim.
-                         if v.ndim == 2:
-                             v = v.unsqueeze(0)
-                batch[k] = v
+            # 4. Create DataLoader with MMCollator
+            dataloader = DataLoader(
+                det_dataset,
+                batch_size=batch_size,
+                shuffle=shuffle,
+                collate_fn=MMCollator(
+                    max_sequence_length=seq_len,
+                    include_metadata=True,
+                    pad=True, # Enable padding for batching
+                    max_crops=self.model.config.max_crops
+                ),
+                num_workers=2, # Use a few workers
+                pin_memory=True if self.device.type == 'cuda' else False,
+            )
             
-            # Create a list of batches to simulate a dataloader
-            # If max_steps is provided, use it. Otherwise default to 10 for testing.
-            steps = max_steps if max_steps else 10
-            dataloader = [batch for _ in range(steps)]
-            
+            # If max_steps is set, we can't easily slice DataLoader, but we can limit iteration later
+            # For now, we return the full dataloader
             return dataloader
+
+    def _build_dummy_dataloader(self, batch_size, max_steps):
+        """Fallback dummy dataloader."""
+        log.info("Using fallback dummy data generator with MolmoProcessor.")
+        
+        # Create a dummy batch
+        image = Image.new('RGB', (336, 336), color='blue')
+        text = "Describe this image."
+        
+        # Use self.processor (MolmoProcessor)
+        inputs = self.processor.process(text=text, images=image)
+        
+        # Convert to tensors
+        batch = {}
+        for k, v in inputs.items():
+            if isinstance(v, (list, np.ndarray)):
+                v = torch.tensor(v)
+            if isinstance(v, torch.Tensor):
+                if v.ndim == 1 and k != "image_input_idx": 
+                     v = v.unsqueeze(0)
+                elif k == "images" and v.ndim == 3:
+                     v = v.unsqueeze(0)
+                elif k == "image_input_idx":
+                     if v.ndim == 2:
+                         v = v.unsqueeze(0)
+                elif k == "image_masks":
+                     if v.ndim == 2:
+                         v = v.unsqueeze(0)
+            batch[k] = v
+        
+        steps = max_steps if max_steps else 10
+        dataloader = [batch for _ in range(steps)]
+        return dataloader
     
     def measure_inference_latency(
         self,

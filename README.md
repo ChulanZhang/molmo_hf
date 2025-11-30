@@ -39,9 +39,20 @@ molmo_hf/
 ```bash
 git clone <repository-url>
 cd molmo_hf
-# pip install -e .
+# 基础安装
+pip install -e .
+
+# 包含实验工具
 pip install -e ".[experiments]"
+
+# 包含训练工具（wandb等）
+pip install -e ".[train]"
+
+# 包含所有依赖
+pip install -e ".[all]"
 ```
+
+**注意**: 本项目是 molmo 的 HuggingFace 兼容版本，主要区别是使用 PyTorch 实现 MoE 架构（而非 megablocks），便于进行动态 MoE topK 等实验。
 ## 🧪 实验与性能分析
 
 本项目包含完整的实验套件，用于分析模型延迟和性能。
