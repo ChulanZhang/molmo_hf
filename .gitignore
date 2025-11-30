@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+
+# Data & Models (不要传到 GitHub)
+checkpoints/
+results/
+data/
+*.bin
+*.pt
+*.pth
+*.safetensors
+
+# IDE
+.vscode/
+.idea/
+
+# Logs
+logs/
+*.log
+EOF
+
+# cache
+.cache
