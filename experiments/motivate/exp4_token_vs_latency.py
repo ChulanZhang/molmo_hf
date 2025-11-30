@@ -14,6 +14,7 @@ from typing import Dict, List
 import matplotlib.pyplot as plt
 import numpy as np
 from tqdm import tqdm
+from PIL import Image
 
 from .base_experiment import BaseExperiment, Timer
 
@@ -36,23 +37,8 @@ class TokenVsLatencyExperiment(BaseExperiment):
             log.info("Starting Experiment 4A: Vision Tokens vs Latency (Controlled Resizing)")
             
             # Load processor
-            from transformers import AutoProcessor
-            from PIL import Image
-            
-            log.info(f"Loading processor for {self.model_path}...")
-            try:
-                model_path = self.model_path
-                if model_path.startswith("hf:"):
-                    model_path = model_path[3:]
-                processor = AutoProcessor.from_pretrained(
-                    model_path, 
-                    trust_remote_code=True,
-                    torch_dtype="auto",
-                    device_map="auto"
-                )
-            except Exception as e:
-                log.error(f"Failed to load processor: {e}")
-                return []
+            # Use self.processor loaded in BaseExperiment
+            processor = self.processor
 
             # Define target resolutions (scales) to force different crop counts
             # Molmo uses 336x336 crops.

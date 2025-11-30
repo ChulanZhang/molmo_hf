@@ -31,6 +31,7 @@ setup(
         "torchvision==0.20.1",
         "Pillow==11.0.0",
         "requests==2.32.3",
+        "scipy==1.16.3",
     ],
     extras_require={
         "dev": [
@@ -43,6 +44,7 @@ setup(
             "matplotlib>=3.5.0",
             "numpy>=1.22.0",
             "pandas>=1.4.0",
+            "nvitop>=1.6.0",
         ],
     },
 )

@@ -1,6 +1,6 @@
 """Model architectures and configurations"""
 
-from molmo.models.modeling_molmoe import MolmoEForCausalLM
-from molmo.models.config_molmoe import MolmoEConfig
+from molmo.models.modeling_molmoe import MolmoForCausalLM
+from molmo.models.config_molmoe import MolmoConfig
 
-__all__ = ["MolmoEForCausalLM", "MolmoEConfig"]
+__all__ = ["MolmoForCausalLM", "MolmoConfig"]

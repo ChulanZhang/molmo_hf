@@ -1,7 +1,5 @@
 # MolmoE-1B
 
-<img src="molmo_logo.png" alt="Logo for the Molmo Project" style="width: auto; height: 50px;">
-
 Molmo是由Allen Institute for AI开发的开源视觉-语言模型家族。MolmoE-1B是基于混合专家(MoE)架构的多模态语言模型，具有1.5B活跃参数和7.2B总参数，在同等规模的多模态模型中实现了业界领先的性能。
 
 **了解更多**: [博客文章](https://molmo.allenai.org/blog) | [论文](https://huggingface.co/papers/2409.17146) | [在线Demo](https://molmo.allenai.org/)

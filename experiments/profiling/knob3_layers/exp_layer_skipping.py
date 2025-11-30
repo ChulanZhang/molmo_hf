@@ -6,7 +6,8 @@ import copy
 from PIL import Image
 from tqdm import tqdm
 import numpy as np
-from transformers import AutoProcessor
+from tqdm import tqdm
+import numpy as np
 import sys
 import os
 
@@ -25,16 +26,14 @@ class LayerSkippingExperiment(BaseExperiment):
             num_samples: Number of repetitions.
             layers_to_keep: List of layer counts to test.
         """
-        # Load processor
-        processor = AutoProcessor.from_pretrained(
-            "allenai/MolmoE-1B-0924", 
-            trust_remote_code=True
-        )
+        # Processor
+        # Use self.processor loaded in BaseExperiment
+        processor = self.processor
         
         # Standard input
         image = Image.new('RGB', (336, 336), color='blue')
         prompt = "Describe this image."
-        inputs = processor.process(text=prompt, images=image, return_tensors="pt")
+        inputs = processor.process(text=prompt, images=image)
         
         # Ensure batch dimension
         if inputs["input_ids"].ndim == 1:

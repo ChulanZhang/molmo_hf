@@ -5,7 +5,8 @@ import torch
 from PIL import Image
 from tqdm import tqdm
 import numpy as np
-from transformers import AutoProcessor
+from tqdm import tqdm
+import numpy as np
 
 import sys
 import os
@@ -24,11 +25,9 @@ class ContextScalingExperiment(BaseExperiment):
             max_length: Maximum text length to test.
             step_size: Step size for text length.
         """
-        # Load processor
-        processor = AutoProcessor.from_pretrained(
-            "allenai/MolmoE-1B-0924", 
-            trust_remote_code=True
-        )
+        # Processor
+        # Use self.processor loaded in BaseExperiment
+        processor = self.processor
         
         # Define lengths to test
         # Start from a small number, go up to max_length
@@ -52,8 +51,7 @@ class ContextScalingExperiment(BaseExperiment):
             # Process input
             inputs = processor.process(
                 text=prompt,
-                images=image,
-                return_tensors="pt"
+                images=image
             )
             
             # Debug shapes

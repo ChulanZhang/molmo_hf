@@ -83,7 +83,7 @@ class MolmoProcessorKwargs(ProcessingKwargs, total=False):
 class MolmoProcessor(ProcessorMixin):
     attributes = ["image_processor", "tokenizer"]
     image_processor_class = "AutoImageProcessor"
-    tokenizer_class = ("GPT2Tokenizer", "GPT2TokenizerFast")
+    tokenizer_class = ("GPT2Tokenizer", "GPT2TokenizerFast", "GPTNeoXTokenizerFast", "PreTrainedTokenizerFast")
 
     def __init__(self, image_processor: MolmoImageProcessor = None, tokenizer : AutoTokenizer = None, **kwargs):
         # self.image_processor = image_processor

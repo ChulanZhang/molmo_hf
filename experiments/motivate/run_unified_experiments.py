@@ -20,7 +20,6 @@ import logging
 import time
 from pathlib import Path
 from typing import Dict, List, Any
-
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
@@ -28,8 +27,7 @@ import torch.nn as nn
 from tqdm import tqdm
 from scipy import stats
 from PIL import Image
-from transformers import AutoProcessor
-
+from transformers import GenerationConfig
 from experiments.motivate.base_experiment import BaseExperiment, Timer
 
 logging.basicConfig(level=logging.INFO)
@@ -52,7 +50,7 @@ class UnifiedExperiment(BaseExperiment):
         
         # 1. Measure Vision Encoder (ViT only)
         if "images" in batch and batch["images"] is not None:
-            vision_backbone = self.model.vision_backbone
+            vision_backbone = self.model.model.vision_backbone
             
             # Warmup only if num_runs > 1
             if num_runs > 1:
@@ -137,12 +135,14 @@ class UnifiedExperiment(BaseExperiment):
             start = time.perf_counter()
             
             with torch.inference_mode():
+                # Create generation config
+                generation_config = GenerationConfig(max_new_tokens=10, use_cache=True)
                 _ = self.model.generate(
                     input_ids=batch["input_ids"],
                     images=batch.get("images"),
                     image_masks=batch.get("image_masks"),
                     image_input_idx=batch.get("image_input_idx"),
-                    max_steps=10, # Short generation for profiling
+                    generation_config=generation_config,
                 )
                 
             if self.device.type == 'cuda':
@@ -222,10 +222,8 @@ class UnifiedExperiment(BaseExperiment):
             # Resolutions: We will generate them dynamically below
             
             # Processor
-            model_path = self.model_path
-            if model_path.startswith("hf:"):
-                model_path = model_path[3:]
-            processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
+            # Use self.processor loaded in BaseExperiment
+            processor = self.processor
             base_image = Image.new('RGB', (2000, 2000), color=(100, 150, 200))
             text = "Describe this image."
             
@@ -236,7 +234,7 @@ class UnifiedExperiment(BaseExperiment):
             warmup_inputs = {k: v.to(self.device).unsqueeze(0) for k, v in warmup_inputs.items()}
             with torch.inference_mode():
                 # Warmup Vision
-                _ = self.model.vision_backbone.encode_image(warmup_inputs["images"])
+                _ = self.model.model.vision_backbone.encode_image(warmup_inputs["images"])
                 # Warmup LLM
                 with torch.autocast("cuda", enabled=True, dtype=torch.bfloat16):
                     _ = self.model(

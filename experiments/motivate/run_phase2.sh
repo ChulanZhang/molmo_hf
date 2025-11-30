@@ -6,7 +6,7 @@ export CUDA_VISIBLE_DEVICES=${1:-0}
 echo "Running Phase 2 on GPU $CUDA_VISIBLE_DEVICES..."
 
 # Configuration
-MODEL_PATH="hf:allenai/MolmoE-1B-0924"
+MODEL_PATH="checkpoints"
 DATASET="coco_2014_vqa"
 SPLIT="validation"
 NUM_SAMPLES=1000 # Not used for scaling but kept for consistency
