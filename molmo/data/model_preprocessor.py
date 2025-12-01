@@ -283,7 +283,8 @@ class MultiModalPreprocessor:
     # How to crops/resize images
     normalize: str = "openai"
     crop_mode: str = "resize"
-    max_crops: int = 6
+    # max_crops: int = 6
+    max_crops: int = 12
     overlap_margins: Tuple[int, int] = (4, 4)
     resize: str = "default"
     use_col_tokens: bool = True

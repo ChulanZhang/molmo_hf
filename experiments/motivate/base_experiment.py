@@ -34,8 +34,9 @@ from molmo.data.dataset import DeterministicDataset
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
 
-# ANSI Colors
+# ANSI Colors for debug output
 class Color:
+    """ANSI escape codes for colored terminal output."""
     HEADER = '\033[95m'
     BLUE = '\033[94m'
     CYAN = '\033[96m'
@@ -47,6 +48,7 @@ class Color:
     UNDERLINE = '\033[4m'
 
 class Timer:
+    """Context manager for timing code blocks."""
     def __init__(self, name):
         self.name = name
     
@@ -59,13 +61,10 @@ class Timer:
         self.end = time.time()
         print(f"{Color.CYAN}[DEBUG] Finished: {self.name} in {self.end - self.start:.2f}s{Color.ENDC}")
 
-# Local implementations of missing utilities
-def get_world_size():
-    if torch.distributed.is_available() and torch.distributed.is_initialized():
-        return torch.distributed.get_world_size()
-    return 1
+
 
 def move_to_device(batch, device):
+    """Recursively move batch items to the specified device."""
     if isinstance(batch, torch.Tensor):
         return batch.to(device)
     elif isinstance(batch, dict):
@@ -75,6 +74,7 @@ def move_to_device(batch, device):
     return batch
 
 def prepare_cli_environment():
+    """Set random seeds for reproducibility."""
     import random
     random.seed(42)
     np.random.seed(42)
@@ -83,7 +83,10 @@ def prepare_cli_environment():
         torch.cuda.manual_seed_all(42)
 
 class BaseExperiment(ABC):
-    """Base class for all motivational study experiments."""
+    """
+    Base class for all motivational study experiments.
+    Handles model initialization, data loading, and performance measurement.
+    """
     
     def __init__(
         self,
@@ -101,14 +104,11 @@ class BaseExperiment(ABC):
             
         self.model_path = model_path
         
-        # Normalize device string to ensure consistency
+        # Device Setup
         if device == "cuda" and torch.cuda.is_available():
             device_idx = torch.cuda.current_device()
             self.device = torch.device(f"cuda:{device_idx}")
             log.info(f"Using GPU device: {self.device} (GPU {device_idx}: {torch.cuda.get_device_name(device_idx)})")
-            cuda_visible = os.environ.get("CUDA_VISIBLE_DEVICES")
-            if cuda_visible:
-                log.info(f"CUDA_VISIBLE_DEVICES={cuda_visible}")
         else:
             self.device = torch.device(device)
         
@@ -118,14 +118,13 @@ class BaseExperiment(ABC):
         
         prepare_cli_environment()
         
-        # Load Model (Local)
+        # Load Model and Processor
         self.model = self._load_model(model_path)
-        
-        # Load Processor (Local + HF Tokenizer)
         self.processor = self._load_processor(model_path)
         self.tokenizer = self.processor.tokenizer
     
     def _load_model(self, checkpoint_dir: str):
+        """Load the Molmo model from a checkpoint directory."""
         log.info(f"Loading model from {checkpoint_dir}...")
         
         # 1. Load Config
@@ -136,7 +135,7 @@ class BaseExperiment(ABC):
             log.info(f"Loading config from {project_config_path}")
             config = MolmoConfig.from_json_file(project_config_path)
         else:
-            log.warning("No local config found in configs/model/. Fetching from HF Hub (allenai/MolmoE-1B-0924)...")
+            log.warning("No local config found. Fetching from HF Hub...")
             config = AutoConfig.from_pretrained("allenai/MolmoE-1B-0924", trust_remote_code=True)
             
         # 2. Instantiate Model
@@ -161,6 +160,7 @@ class BaseExperiment(ABC):
         return model
 
     def _load_processor(self, checkpoint_dir: str):
+        """Load the Molmo processor (tokenizer + image processor)."""
         log.info("Loading MolmoProcessor...")
         
         # 1. Image Processor
@@ -174,7 +174,7 @@ class BaseExperiment(ABC):
             log.info(f"Loading tokenizer from {project_tokenizer_path}")
             tokenizer_path = project_tokenizer_path
         else:
-            log.warning("No local tokenizer found in configs/tokenizer/. Fetching from HF Hub (allenai/MolmoE-1B-0924)...")
+            log.warning("No local tokenizer found. Fetching from HF Hub...")
             tokenizer_path = "allenai/MolmoE-1B-0924"
             
         tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
@@ -192,20 +192,22 @@ class BaseExperiment(ABC):
         shuffle: bool = False,
         seq_len: int = 1536,
     ) -> DataLoader:
-        """Build a dataloader for the given dataset."""
+        """
+        Build a dataloader for the given dataset name.
+        Uses the project's data pipeline (MultiModalPreprocessor, DataFormatter, MMCollator).
+        
+        Returns:
+            DataLoader and the original dataset (for getting dataset length)
+        """
         with Timer(f"Building dataloader for {dataset_name}/{split}"):
             # 1. Get Dataset
             try:
                 dataset = get_dataset_by_name(dataset_name, split=split)
-            except NotImplementedError:
-                log.warning(f"Dataset {dataset_name} not found in academic_datasets. Using dummy fallback.")
-                return self._build_dummy_dataloader(batch_size, max_steps)
             except Exception as e:
-                log.warning(f"Error loading dataset {dataset_name}: {e}. Using dummy fallback.")
-                return self._build_dummy_dataloader(batch_size, max_steps)
+                log.error(f"Error loading dataset {dataset_name}: {e}")
+                raise e
 
-            # 2. Create Preprocessor
-            # Only specify parameters that differ from MultiModalPreprocessor defaults
+            # 2. Configure Preprocessor
             mm_preprocessor = MultiModalPreprocessor(
                 tokenizer=self.tokenizer,
                 crop_mode=self.model.config.crop_mode,  # "overlap-and-resize-c2" != default "resize"
@@ -226,13 +228,20 @@ class BaseExperiment(ABC):
             preprocessor = Preprocessor(
                 formater=formatter,
                 mm_preprocessor=mm_preprocessor,
+                for_inference=True,  # Critical for evaluation performance
             )
             
-            # 3. Wrap in DeterministicDataset
+            # 3. Wrap in DeterministicDataset for reproducibility
             # seed=42 is hardcoded for reproducibility in motivation experiments
             det_dataset = DeterministicDataset(dataset, preprocessor, seed=42)
             
+            # Store dataset length for reference
+            dataset_length = len(det_dataset)
+            if max_steps is not None:
+                dataset_length = min(dataset_length, max_steps)
+            
             # 4. Create DataLoader with MMCollator
+            # Use num_workers=0 for single-process evaluation (better performance for small batches)
             dataloader = DataLoader(
                 det_dataset,
                 batch_size=batch_size,
@@ -243,191 +252,239 @@ class BaseExperiment(ABC):
                     pad=True, # Enable padding for batching
                     max_crops=self.model.config.max_crops
                 ),
-                num_workers=2, # Use a few workers
-                pin_memory=True if self.device.type == 'cuda' else False,
+                num_workers=0,  # 0 workers for better performance in single-process evaluation
+                pin_memory=False,  # Not needed with num_workers=0
             )
             
-            # If max_steps is set, we can't easily slice DataLoader, but we can limit iteration later
-            # For now, we return the full dataloader
+            # Store dataset length as attribute for access
+            dataloader.dataset_length = dataset_length
+            
             return dataloader
-
-    def _build_dummy_dataloader(self, batch_size, max_steps):
-        """Fallback dummy dataloader."""
-        log.info("Using fallback dummy data generator with MolmoProcessor.")
-        
-        # Create a dummy batch
-        image = Image.new('RGB', (336, 336), color='blue')
-        text = "Describe this image."
-        
-        # Use self.processor (MolmoProcessor)
-        inputs = self.processor.process(text=text, images=image)
-        
-        # Convert to tensors
-        batch = {}
-        for k, v in inputs.items():
-            if isinstance(v, (list, np.ndarray)):
-                v = torch.tensor(v)
-            if isinstance(v, torch.Tensor):
-                if v.ndim == 1 and k != "image_input_idx": 
-                     v = v.unsqueeze(0)
-                elif k == "images" and v.ndim == 3:
-                     v = v.unsqueeze(0)
-                elif k == "image_input_idx":
-                     if v.ndim == 2:
-                         v = v.unsqueeze(0)
-                elif k == "image_masks":
-                     if v.ndim == 2:
-                         v = v.unsqueeze(0)
-            batch[k] = v
-        
-        steps = max_steps if max_steps else 10
-        dataloader = [batch for _ in range(steps)]
-        return dataloader
     
     def measure_inference_latency(
         self,
         batch: Dict[str, torch.Tensor],
         max_new_tokens: int = 128,
         measure_components: bool = True,
+        num_runs: int = 1,
+        use_hook_for_llm_prefill: bool = False,
     ) -> Dict[str, float]:
         """
-        Measure end-to-end inference latency and optionally component latencies.
+        Measure end-to-end inference latency and component latencies.
         
+        Args:
+            batch: Input batch dictionary.
+            max_new_tokens: Number of tokens to generate.
+            measure_components: Whether to measure individual component latencies (Vision, Prefill).
+            num_runs: Number of runs to average over (for stability).
+            use_hook_for_llm_prefill: If True, use forward hooks to directly measure LLM prefill.
+                                     If False (default), use subtraction method (T_prefill_step - T_vision_total).
+            
         Returns:
-            Dictionary with latency measurements in milliseconds:
-            - T_total: Total end-to-end latency
-            - T_vision: Vision encoder latency (if measure_components)
-            - T_projector: Projector latency (if measure_components)
-            - T_LLM_prefill: LLM prefill latency (if measure_components)
-            - T_LLM_decode: LLM decode latency (if measure_components)
+            Dictionary with latency measurements (ms) and token counts.
         """
-        # Move batch to device with detailed error handling
+        # 1. Move batch to device
         try:
             batch = move_to_device(batch, self.device)
-            
-            # Verify critical tensors are on correct device and accessible
-            if self.device.type == 'cuda' and "input_ids" in batch:
-                input_device = batch["input_ids"].device
-                # Normalize device comparison - handle cuda vs cuda:0
-                if input_device.type == 'cuda' and self.device.type == 'cuda':
-                    # Both are CUDA, check if indices match
-                    if input_device.index != self.device.index:
-                        log.info(f"input_ids on {input_device}, moving to {self.device} for consistency")
-                        batch["input_ids"] = batch["input_ids"].to(self.device)
-                elif input_device != self.device:
-                    log.warning(f"input_ids on wrong device: {input_device}, moving to {self.device}")
-                    batch["input_ids"] = batch["input_ids"].to(self.device)
-                
-                # Test access to input_ids to catch memory errors early
-                try:
-                    _ = batch["input_ids"].shape
-                    _ = batch["input_ids"].dtype
-                    # Try a simple operation to verify memory is valid
-                    test_mask = batch["input_ids"] != -1
-                    _ = test_mask.shape
-                except RuntimeError as e:
-                    error_str = str(e)
-                    if "illegal memory access" in error_str or "CUDA" in error_str:
-                        log.error(f"input_ids has illegal memory access: {error_str}")
-                        log.error("GPU memory appears corrupted. Please restart Python process.")
-                        raise RuntimeError(f"GPU memory error in input_ids: {error_str}") from e
-                    raise
-        except RuntimeError as e:
-            error_str = str(e)
-            if "illegal memory access" in error_str or "CUDA" in error_str:
-                log.error(f"CUDA error when moving batch to device: {error_str}")
-                log.error("This suggests GPU memory corruption. Please restart Python process.")
-                raise RuntimeError(f"GPU memory error during data transfer: {error_str}") from e
-            else:
-                raise
-        
-        if self.device.type == 'cuda':
-            try:
+            if self.device.type == 'cuda':
                 torch.cuda.synchronize(self.device)
-            except RuntimeError as e:
-                error_str = str(e)
-                if "illegal memory access" in error_str:
-                    log.error(f"CUDA error during synchronize: {error_str}")
-                    log.error("GPU appears to be in bad state. Please restart Python process.")
-                    raise RuntimeError(f"GPU error during synchronize: {error_str}") from e
-                raise
+        except RuntimeError as e:
+            log.error(f"Error moving batch to device: {e}")
+            raise
         
         results = {}
         
         if measure_components:
-            # Measure vision encoder and projector
+            # --- Measure Vision Components ---
             if "images" in batch and batch["images"] is not None:
-                # Check if we can use the instrumented method
-                if hasattr(self.model.model.vision_backbone, "forward_with_metrics"):
-                    try:
-                        _, metrics = self.model.model.vision_backbone.forward_with_metrics(
-                            batch["images"], 
-                            batch.get("image_masks")
-                        )
-                        results["T_vision"] = metrics.get("T_vision", 0.0)
-                        results["T_projector"] = metrics.get("T_projector", 0.0)
-                    except Exception as e:
-                        log.warning(f"forward_with_metrics failed: {e}")
-                        results["T_vision"] = 0.0
-                        results["T_projector"] = 0.0
-                else:
-                    # Fallback to manual measurement (less accurate for projector)
-                    start = time.perf_counter()
-                    if self.device.type == 'cuda':
-                        torch.cuda.synchronize(self.device)
-                    
+                vision_backbone = self.model.model.vision_backbone
+                
+                # Warmup (only if averaging)
+                if num_runs > 1:
                     with torch.inference_mode():
-                        _ = self.model.model.vision_backbone.encode_image(
-                            batch["images"]
-                        )
-                    
+                        _ = vision_backbone.encode_image(batch["images"])
+                
+                # 1. Measure Vision Encoder (ViT only)
+                latencies_vit = []
+                for _ in range(num_runs):
                     if self.device.type == 'cuda':
                         torch.cuda.synchronize(self.device)
-                    results["T_vision"] = (time.perf_counter() - start) * 1000
-                    results["T_projector"] = 0.0
+                    start = time.perf_counter()
+                    with torch.inference_mode():
+                        _ = vision_backbone.encode_image(batch["images"])
+                    if self.device.type == 'cuda':
+                        torch.cuda.synchronize(self.device)
+                    latencies_vit.append((time.perf_counter() - start) * 1000)
+                results["T_vision_encoder"] = np.mean(latencies_vit)
+                
+                # 2. Measure Total Vision (ViT + Projector)
+                # We measure the full forward pass of the vision backbone which includes the projector
+                latencies_vision_total = []
+                for _ in range(num_runs):
+                    if self.device.type == 'cuda':
+                        torch.cuda.synchronize(self.device)
+                    start = time.perf_counter()
+                    with torch.inference_mode():
+                        _ = vision_backbone(batch["images"], batch.get("image_masks"))
+                    if self.device.type == 'cuda':
+                        torch.cuda.synchronize(self.device)
+                    latencies_vision_total.append((time.perf_counter() - start) * 1000)
+                results["T_vision_total"] = np.mean(latencies_vision_total)
+                
+                # Calculate Projector Latency
+                results["T_projector"] = max(0.0, results["T_vision_total"] - results["T_vision_encoder"])
+                
+                # For backward compatibility
+                results["T_vision"] = results["T_vision_total"]
             else:
-                results["T_vision"] = 0.0
+                results["T_vision_encoder"] = 0.0
+                results["T_vision_total"] = 0.0
                 results["T_projector"] = 0.0
+                results["T_vision"] = 0.0
 
-            # Measure LLM Prefill explicitly
-            # This runs a single forward pass with the inputs
-            start = time.perf_counter()
+            # --- Measure LLM Prefill ---
+            # Direct measurement: Use hooks to measure LLM prefill time directly.
+            # Hook on first transformer block (start) and last transformer block (end).
+            # This avoids the subtraction method which can have measurement errors.
+            
+            if "images" in batch and batch["images"] is not None:
+                transformer = self.model.model.transformer
+                
+                # Use hooks to measure LLM prefill time directly
+                llm_prefill_times = []
+                llm_start_time = None
+                
+                def start_hook(module, input, output):
+                    nonlocal llm_start_time
+                    if self.device.type == 'cuda':
+                        torch.cuda.synchronize(self.device)
+                    llm_start_time = time.perf_counter()
+                
+                def end_hook(module, input, output):
+                    nonlocal llm_start_time
+                    if llm_start_time is not None:
+                        if self.device.type == 'cuda':
+                            torch.cuda.synchronize(self.device)
+                        end_time = time.perf_counter()
+                        llm_prefill_times.append((end_time - llm_start_time) * 1000)
+                        llm_start_time = None
+                
+                # Register hooks on first and last transformer blocks
+                start_hook_handle = None
+                end_hook_handle = None
+                if hasattr(transformer, 'blocks') and len(transformer.blocks) > 0:
+                    start_hook_handle = transformer.blocks[0].register_forward_hook(start_hook)
+                    end_hook_handle = transformer.blocks[-1].register_forward_hook(end_hook)
+                
+                # Warmup
+                if num_runs > 1:
+                    with torch.inference_mode():
+                        with torch.autocast("cuda", enabled=True, dtype=torch.bfloat16):
+                            _ = self.model(
+                                input_ids=batch["input_ids"],
+                                images=batch.get("images"),
+                                image_masks=batch.get("image_masks"),
+                                image_input_idx=batch.get("image_input_idx"),
+                                attention_mask=batch.get("attention_mask"),
+                                attention_bias=batch.get("attention_bias"),
+                                position_ids=batch.get("position_ids"),
+                            )
+                    llm_prefill_times.clear()  # Clear warmup measurement
+                
+                # Measure LLM prefill using hooks
+                for _ in range(num_runs):
+                    if self.device.type == 'cuda':
+                        torch.cuda.synchronize(self.device)
+                    with torch.inference_mode():
+                        with torch.autocast("cuda", enabled=True, dtype=torch.bfloat16):
+                            _ = self.model(
+                                input_ids=batch["input_ids"],
+                                images=batch.get("images"),
+                                image_masks=batch.get("image_masks"),
+                                image_input_idx=batch.get("image_input_idx"),
+                                attention_mask=batch.get("attention_mask"),
+                                attention_bias=batch.get("attention_bias"),
+                                position_ids=batch.get("position_ids"),
+                            )
+                    if self.device.type == 'cuda':
+                        torch.cuda.synchronize(self.device)
+                
+                # Remove hooks
+                if start_hook_handle is not None:
+                    start_hook_handle.remove()
+                if end_hook_handle is not None:
+                    end_hook_handle.remove()
+                
+                if llm_prefill_times:
+                    results["T_LLM_prefill"] = np.mean(llm_prefill_times)
+                else:
+                    # Fallback to subtraction method if hooks failed
+                    log.warning("Hooks did not capture LLM prefill time, falling back to subtraction method")
+                    latencies_prefill_step = []
+                    for _ in range(num_runs):
+                        if self.device.type == 'cuda':
+                            torch.cuda.synchronize(self.device)
+                        start = time.perf_counter()
+                        with torch.inference_mode():
+                            with torch.autocast("cuda", enabled=True, dtype=torch.bfloat16):
+                                _ = self.model(
+                                    input_ids=batch["input_ids"],
+                                    images=batch.get("images"),
+                                    image_masks=batch.get("image_masks"),
+                                    image_input_idx=batch.get("image_input_idx"),
+                                )
+                        if self.device.type == 'cuda':
+                            torch.cuda.synchronize(self.device)
+                        latencies_prefill_step.append((time.perf_counter() - start) * 1000)
+                    
+                    T_prefill_step = np.mean(latencies_prefill_step)
+                    results["T_LLM_prefill"] = max(0.0, T_prefill_step - results.get("T_vision_total", 0.0))
+            else:
+                # No images, measure LLM prefill directly
+                transformer = self.model.model.transformer
+                
+                # Warmup
+                if num_runs > 1:
+                    with torch.inference_mode():
+                        with torch.autocast("cuda", enabled=True, dtype=torch.bfloat16):
+                            _ = transformer(
+                                input_ids=batch["input_ids"],
+                                attention_mask=batch.get("attention_mask"),
+                                attention_bias=batch.get("attention_bias"),
+                                position_ids=batch.get("position_ids"),
+                            )
+                
+                latencies_llm_prefill = []
+                for _ in range(num_runs):
+                    if self.device.type == 'cuda':
+                        torch.cuda.synchronize(self.device)
+                    start = time.perf_counter()
+                    with torch.inference_mode():
+                        with torch.autocast("cuda", enabled=True, dtype=torch.bfloat16):
+                            _ = transformer(
+                                input_ids=batch["input_ids"],
+                                attention_mask=batch.get("attention_mask"),
+                                attention_bias=batch.get("attention_bias"),
+                                position_ids=batch.get("position_ids"),
+                            )
+                    if self.device.type == 'cuda':
+                        torch.cuda.synchronize(self.device)
+                    latencies_llm_prefill.append((time.perf_counter() - start) * 1000)
+                
+                results["T_LLM_prefill"] = np.mean(latencies_llm_prefill)
+        
+        # --- Measure Total Generation Latency (Decode) ---
+        # Only if max_new_tokens > 0
+        if max_new_tokens > 0:
             if self.device.type == 'cuda':
                 torch.cuda.synchronize(self.device)
+            start = time.perf_counter()
             
             with torch.inference_mode():
                 with torch.autocast("cuda", enabled=True, dtype=torch.bfloat16):
-                    try:
-                        _ = self.model(
-                            input_ids=batch["input_ids"],
-                            images=batch.get("images"),
-                            image_masks=batch.get("image_masks"),
-                            image_input_idx=batch.get("image_input_idx"),
-                        )
-                    except Exception as e:
-                        log.warning(f"Prefill measurement failed: {e}")
-            
-            if self.device.type == 'cuda':
-                torch.cuda.synchronize(self.device)
-            
-            T_total_prefill = (time.perf_counter() - start) * 1000
-            # T_total_prefill includes a re-run of vision/projector
-            # So we subtract the measured vision/projector times to isolate LLM prefill
-            results["T_LLM_prefill"] = max(0.0, T_total_prefill - results.get("T_vision", 0.0) - results.get("T_projector", 0.0))
-        
-        # Measure total end-to-end latency (Generation)
-        start = time.perf_counter()
-        if self.device.type == 'cuda':
-            torch.cuda.synchronize(self.device)
-        
-        with torch.inference_mode():
-            with torch.autocast("cuda", enabled=True, dtype=torch.bfloat16):
-                # Clear cache before generate
-                if self.device.type == 'cuda':
-                    torch.cuda.empty_cache()
-                
-                try:
-                    # Create generation config
+                    if self.device.type == 'cuda':
+                        torch.cuda.empty_cache()
+                    
                     from transformers import GenerationConfig
                     generation_config = GenerationConfig(max_new_tokens=max_new_tokens, use_cache=True)
                     
@@ -438,75 +495,74 @@ class BaseExperiment(ABC):
                         image_input_idx=batch.get("image_input_idx"),
                         generation_config=generation_config,
                     )
-                except RuntimeError as e:
-                    # ... (error handling omitted for brevity, keeping existing logic if possible, but simplified here)
-                    log.error(f"Generation failed: {e}")
-                    raise
-        
-        if self.device.type == 'cuda':
-            torch.cuda.synchronize(self.device)
-        results["T_total"] = (time.perf_counter() - start) * 1000
-        
-        # Calculate Decode Latency
-        # T_total includes Vision + Prefill + Decode
-        # So T_decode = T_total - T_vision - T_LLM_prefill
-        # Note: T_vision is only non-zero if we measured it above, but T_total includes it implicitly
-        # If measure_components is False, we can't calculate breakdown
-        if measure_components:
-            results["T_LLM_decode"] = max(0.0, results["T_total"] - results["T_vision"] - results["T_LLM_prefill"])
-        
-        # Count tokens
-        input_ids = batch["input_ids"]
-        # output is likely CausalLMOutputWithPast or similar if not return_dict=False?
-        # Wait, model.generate returns token ids tensor usually.
-        # Let's check modeling_molmoe.py generate return.
-        # It returns CausalLMOutputWithPast if return_dict=True (default in generate usually?)
-        # Actually HF generate returns tensor by default unless return_dict_in_generate=True
-        # MolmoForCausalLM.generate implementation:
-        # ...
-        # return CausalLMOutputWithPast(...)
-        # Wait, the generate method in MolmoForCausalLM returns CausalLMOutputWithPast?
-        # Let's check line 2305 of modeling_molmoe.py
-        # Yes, it returns CausalLMOutputWithPast.
-        # So output.logits is available.
-        # But where are the generated tokens?
-        # The generate method in MolmoForCausalLM seems to be a forward pass wrapper?
-        # No, it has a loop?
-        # Let's re-read modeling_molmoe.py generate.
-        # It seems it does NOT have a loop. It just calls self.model() once?
-        # Line 2326: checks generation_config
-        # Line 2339: mask_len = ...
-        # Line 2353: outputs = self.model(...)
-        # It seems MolmoForCausalLM.generate is NOT a full generation loop!
-        # It looks like a single forward pass with some setup?
-        # If so, my latency measurement for "Generation" is actually just another prefill/forward pass?
-        # This is a critical finding if true.
-        # However, for now I will assume output has .logits or is a tensor.
-        # If it returns CausalLMOutputWithPast, then output.logits exists.
-        
-        # For now, let's assume standard HF behavior for compatibility or fix later.
-        # If output is CausalLMOutputWithPast:
-        if hasattr(output, "logits"):
-             # This is just one step?
-             # If so, num_output_tokens is 1?
-             results["num_output_tokens"] = 1
-             results["num_input_text_tokens"] = int(input_ids.shape[1])
+            
+            if self.device.type == 'cuda':
+                torch.cuda.synchronize(self.device)
+            results["T_total"] = (time.perf_counter() - start) * 1000
+            
+            # Calculate Decode Latency
+            # T_total includes Vision + Prefill + Decode
+            if measure_components:
+                results["T_LLM_decode"] = max(0.0, results["T_total"] - results.get("T_vision_total", 0.0) - results.get("T_LLM_prefill", 0.0))
         else:
-             # Assume tensor of ids
-             output_ids = output
-             results["num_input_text_tokens"] = int(input_ids.shape[1])
-             if output_ids.shape[1] > input_ids.shape[1]:
-                 results["num_output_tokens"] = int(output_ids.shape[1] - input_ids.shape[1])
-             else:
-                 results["num_output_tokens"] = int(output_ids.shape[1])
+            # If no generation, we still need to measure T_total (prefill step)
+            # If measure_components=False, we need to measure it directly
+            if not measure_components:
+                # Measure total prefill latency directly (Vision + LLM Prefill in one pass)
+                latencies_total = []
+                for _ in range(num_runs):
+                    if self.device.type == 'cuda':
+                        torch.cuda.synchronize(self.device)
+                    start = time.perf_counter()
+                    with torch.inference_mode():
+                        with torch.autocast("cuda", enabled=True, dtype=torch.bfloat16):
+                            _ = self.model(
+                                input_ids=batch["input_ids"],
+                                images=batch.get("images"),
+                                image_masks=batch.get("image_masks"),
+                                image_input_idx=batch.get("image_input_idx"),
+                            )
+                    if self.device.type == 'cuda':
+                        torch.cuda.synchronize(self.device)
+                    latencies_total.append((time.perf_counter() - start) * 1000)
+                results["T_total"] = np.mean(latencies_total)
+            else:
+                # If measure_components=True, T_total is just the prefill step (Vision + LLM Prefill)
+                results["T_total"] = results.get("T_vision_total", 0.0) + results.get("T_LLM_prefill", 0.0)
+            results["T_LLM_decode"] = 0.0
+            output = None # No generation output
+
+        # --- Token Counting ---
+        input_ids = batch["input_ids"]
+        results["num_input_text_tokens"] = int(input_ids.shape[1])
+        
+        # Determine output tokens
+        if output is not None:
+            if hasattr(output, "logits"):
+                 results["num_output_tokens"] = 1
+            else:
+                 if output.shape[1] > input_ids.shape[1]:
+                     results["num_output_tokens"] = int(output.shape[1] - input_ids.shape[1])
+                 else:
+                     results["num_output_tokens"] = int(output.shape[1])
+        else:
+            results["num_output_tokens"] = 0
         
         # Count vision tokens (if available)
-        if "images" in batch and batch["images"] is not None:
+        # Use image_input_idx to count valid vision tokens
+        if "image_input_idx" in batch and batch["image_input_idx"] is not None:
+            # image_input_idx maps vision features to input_ids positions
+            # Valid entries (>=0) represent actual vision tokens used
+            results["num_vision_tokens"] = int((batch["image_input_idx"] >= 0).sum().item())
+        elif "images" in batch and batch["images"] is not None:
+            # Fallback: estimate from images shape
             images = batch["images"]
-            if len(images.shape) == 4:  # (B, H, W, C) or similar
-                results["num_vision_tokens"] = images.shape[1] * images.shape[2] if len(images.shape) == 4 else 0
+            if len(images.shape) == 4:  # (B, num_crops, H, W, C) or similar
+                # Assume 576 tokens per crop (24x24 patches)
+                num_crops = images.shape[1]
+                results["num_vision_tokens"] = num_crops * 576
             elif len(images.shape) == 3:  # (B, num_patches, patch_dim)
-                results["num_vision_tokens"] = images.shape[1]
+                results["num_vision_tokens"] = int(images.shape[1])
             else:
                 results["num_vision_tokens"] = 0
         else:
@@ -521,14 +577,7 @@ class BaseExperiment(ABC):
     ) -> Dict[str, float]:
         """
         Estimate FLOPs for the inference.
-        
-        Returns:
-            Dictionary with FLOP estimates:
-            - flops_vision: Vision encoder FLOPs
-            - flops_projector: Projector FLOPs
-            - flops_llm_prefill: LLM prefill FLOPs
-            - flops_llm_decode: LLM decode FLOPs
-            - flops_total: Total FLOPs
+        Note: This is a rough estimation based on parameter counts and sequence lengths.
         """
         results = {}
         
@@ -577,7 +626,7 @@ class BaseExperiment(ABC):
         return results
     
     def compute_statistics(self, latencies: List[float]) -> Dict[str, float]:
-        """Compute P50, P95, P99, mean, std from latency list."""
+        """Compute summary statistics (mean, std, percentiles) for a list of latencies."""
         latencies = np.array(latencies)
         return {
             "P50": float(np.percentile(latencies, 50)),
@@ -589,8 +638,126 @@ class BaseExperiment(ABC):
             "max": float(np.max(latencies)),
         }
     
+    def count_parameters(self) -> Dict[str, int]:
+        """
+        Count parameters for each component (Vision Encoder, Projector, LLM).
+        
+        Returns:
+            Dictionary with parameter counts for each component.
+        """
+        results = {}
+        
+        # Vision Encoder Parameters (only image_vit)
+        vision_backbone = self.model.model.vision_backbone
+        if hasattr(vision_backbone, 'image_vit') and vision_backbone.image_vit is not None:
+            vision_params = sum(p.numel() for p in vision_backbone.image_vit.parameters())
+            results["params_vision_encoder"] = vision_params
+        else:
+            results["params_vision_encoder"] = 0
+        
+        # Projector Parameters (includes image_projector + connector components: pooling, cls_projector, pad_embed)
+        # pad_embed is used after encode_image but before pooling/projector, so it's part of the connector/projector phase
+        projector_params = 0
+        if hasattr(vision_backbone, 'image_projector') and vision_backbone.image_projector is not None:
+            projector_params += sum(p.numel() for p in vision_backbone.image_projector.parameters())
+        # Add connector components to projector
+        if hasattr(vision_backbone, 'image_pooling_2d') and vision_backbone.image_pooling_2d is not None:
+            projector_params += sum(p.numel() for p in vision_backbone.image_pooling_2d.parameters())
+        if hasattr(vision_backbone, 'cls_projector') and vision_backbone.cls_projector is not None:
+            projector_params += sum(p.numel() for p in vision_backbone.cls_projector.parameters())
+        if hasattr(vision_backbone, 'pad_embed') and vision_backbone.pad_embed is not None:
+            # pad_embed is a nn.Parameter (tensor), not a Module, so it doesn't have .parameters()
+            # It's a tensor-like object, so we can directly call numel()
+            projector_params += vision_backbone.pad_embed.numel()
+        results["params_projector"] = projector_params
+        # Keep connector for backward compatibility (set to 0)
+        results["params_connector"] = 0
+        
+        # LLM Parameters
+        # For MoE models, we need to handle expert parameters correctly
+        if hasattr(self.model.model, 'transformer') and self.model.model.transformer is not None:
+            transformer = self.model.model.transformer
+            
+            # Check if this is a MoE model
+            moe_num_experts = getattr(self.model.config, 'moe_num_experts', 0)
+            moe_top_k = getattr(self.model.config, 'moe_top_k', 1)
+            is_moe = moe_num_experts > 0
+            
+            if is_moe:
+                # For MoE models, calculate both total and active parameters
+                # Total parameters: all experts (model size)
+                llm_params_total = sum(p.numel() for p in transformer.parameters())
+                
+                # Active parameters: only top_k experts per MoE layer
+                # Structure: transformer.blocks[i].mlp.experts[j] contains expert parameters
+                #           transformer.blocks[i].mlp.gate contains gate parameters
+                #           transformer.blocks[i].mlp.ff_norm contains normalization parameters
+                
+                moe_expert_params = 0  # Parameters in MoE experts
+                moe_gate_params = 0    # Parameters in MoE gates (always active)
+                moe_norm_params = 0    # Parameters in MoE normalization (always active)
+                non_moe_params = 0     # Non-MoE parameters (always active)
+                
+                # Count parameters by type
+                for name, param in transformer.named_parameters():
+                    if '.mlp.experts.' in name:
+                        # This is a MoE expert parameter
+                        moe_expert_params += param.numel()
+                    elif '.mlp.gate' in name:
+                        # This is a MoE gate parameter (always active)
+                        moe_gate_params += param.numel()
+                    elif '.mlp.ff_norm' in name:
+                        # This is a MoE normalization parameter (always active)
+                        moe_norm_params += param.numel()
+                    else:
+                        # Non-MoE parameter (always active): embeddings, attention, layer norms, etc.
+                        non_moe_params += param.numel()
+                
+                # Active MoE params = (top_k / num_experts) * expert params + gate params + norm params
+                active_moe_params = int((moe_top_k / moe_num_experts) * moe_expert_params) + moe_gate_params + moe_norm_params
+                llm_params_active = non_moe_params + active_moe_params
+                
+                # Use total parameters for consistency (model size)
+                results["params_llm"] = llm_params_total
+                results["params_llm_active"] = llm_params_active
+                results["params_llm_total"] = llm_params_total  # Alias for clarity
+                results["moe_num_experts"] = moe_num_experts
+                results["moe_top_k"] = moe_top_k
+                results["moe_expert_params"] = moe_expert_params
+                results["moe_gate_params"] = moe_gate_params
+            else:
+                # Non-MoE model: all parameters are active
+                llm_params = sum(p.numel() for p in transformer.parameters())
+                results["params_llm"] = llm_params
+                results["params_llm_active"] = llm_params
+                results["params_llm_total"] = llm_params
+                results["moe_num_experts"] = 0
+                results["moe_top_k"] = 0
+        else:
+            results["params_llm"] = 0
+            results["params_llm_active"] = 0
+            results["params_llm_total"] = 0
+            results["moe_num_experts"] = 0
+            results["moe_top_k"] = 0
+        
+        # Total Parameters (all parameters in the model)
+        results["params_total"] = (
+            results["params_vision_encoder"] +
+            results["params_projector"] +
+            results["params_llm"]
+        )
+        
+        # Active Parameters (for MoE: only top_k experts; for non-MoE: same as total)
+        results["params_active"] = (
+            results["params_vision_encoder"] +
+            results["params_projector"] +
+            results["params_llm_active"]
+        )
+        
+        return results
+    
     def save_results(self, results: Dict[str, Any], filename: str):
-        """Save results to JSON file."""
+        """Save results dictionary to a JSON file."""
         output_path = self.output_dir / filename
         with open(output_path, 'w') as f:
             json.dump(results, f, indent=2)
@@ -598,5 +765,5 @@ class BaseExperiment(ABC):
     
     @abstractmethod
     def run(self, *args, **kwargs):
-        """Run the experiment. Must be implemented by subclasses."""
+        """Abstract method to run the experiment."""
         pass

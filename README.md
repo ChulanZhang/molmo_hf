@@ -61,10 +61,17 @@ pip install -e ".[all]"
 
 ### 快速开始
 
-**1. Motivation Study (Phase 1 & 2)**
+**1. Motivation Study (All Experiments)**
 ```bash
-bash experiments/motivate/run_phase1.sh
-bash experiments/motivate/run_phase2.sh
+# Run all experiments in sequence
+bash experiments/motivate/run_all_experiments.sh [GPU_ID]
+
+# Or run individual experiments
+python experiments/motivate/exp1_latency_distribution.py --model_path checkpoints --num_samples 5000
+python experiments/motivate/exp2_component_profiling.py --model_path checkpoints --num_samples 1000
+python experiments/motivate/exp3_vision_tokens_vs_latency.py --model_path checkpoints
+python experiments/motivate/exp4_language_tokens_vs_latency.py --model_path checkpoints
+python experiments/motivate/exp5_flops_vs_latency.py --exp3_results ... --exp4_results ...
 ```
 
 **2. Profiling Experiments (Control Knobs)**
