@@ -171,19 +171,22 @@ class ComponentProfilingExperiment(BaseExperiment):
             startangle=90,
             pctdistance=0.85,  # Percentages inside the pie
             textprops={'fontsize': 14},
-            wedgeprops={'edgecolor': 'black', 'linewidth': 0.5}  # Smaller white border
+            wedgeprops={'edgecolor': 'black', 'linewidth': 1.5}  # Thicker border
         )
         
         # Manual distance mapping to avoid overlap (reference: plotting/parameters_pie_chart.py)
-        # Increase distances for Vision Encoder and Projector to avoid overlap
+        # Vision Encoder: outermost, LLM: middle, Projector: innermost
+        # All moved inward to keep within pie chart
         distance_map = {}
         for label in param_labels_filtered:
             if label == 'Vision Encoder':
-                distance_map[label] = 0.90  # Further from center to avoid overlap with Projector
+                distance_map[label] = 0.85  # Outermost position (moved inward)
+            elif label == 'LLM':
+                distance_map[label] = 0.75   # Middle position (moved inward)
             elif label == 'Projector':
-                distance_map[label] = 0.85   # Further from center, avoid overlap with Vision Encoder
-            else:  # LLM
-                distance_map[label] = 0.85   # Normal distance for large slice
+                distance_map[label] = 0.65   # Innermost position (moved inward)
+            else:
+                distance_map[label] = 0.75   # Default
         
         # Set text style and manually adjust positions to avoid overlap
         for i, (autotext, wedge, label) in enumerate(zip(autotexts, wedges, param_labels_filtered)):
@@ -247,18 +250,22 @@ class ComponentProfilingExperiment(BaseExperiment):
             startangle=90,
             pctdistance=0.85,  # Percentages inside the pie
             textprops={'fontsize': 14},
-            wedgeprops={'edgecolor': 'black', 'linewidth': 0.5}  # Smaller white border
+            wedgeprops={'edgecolor': 'black', 'linewidth': 1.5}  # Thicker border
         )
         
         # Manual distance mapping to avoid overlap (reference: plotting/latency_pie_chart.py)
+        # Vision Encoder: outermost, LLM: middle, Projector: innermost
+        # All moved inward to keep within pie chart
         distance_map = {}
         for label in lat_labels_filtered:
             if label == 'Vision Encoder':
-                distance_map[label] = 0.80  # Slightly closer to avoid overlap with Projector
+                distance_map[label] = 0.85  # Outermost position (moved inward)
+            elif label == 'LLM':
+                distance_map[label] = 0.75   # Middle position (moved inward)
             elif label == 'Projector':
-                distance_map[label] = 0.75   # Between Vision Encoder and center, avoid overlap
-            else:  # LLM
-                distance_map[label] = 0.85   # Normal distance for large slice
+                distance_map[label] = 0.65   # Innermost position (moved inward)
+            else:
+                distance_map[label] = 0.75   # Default
         
         # Set text style and manually adjust positions to avoid overlap
         for i, (autotext, wedge, label) in enumerate(zip(autotexts, wedges, lat_labels_filtered)):
@@ -287,7 +294,7 @@ class ComponentProfilingExperiment(BaseExperiment):
                            ncol=1, fontsize=14, framealpha=0.9)
         legend.get_frame().set_linewidth(1.5)
         
-        plt.title("Latency Distribution", fontsize=18)
+        # plt.title("Latency Distribution", fontsize=18)
         plt.tight_layout()
         plt.savefig(fig_dir / f"exp2_component_profiling_latency_{dataset_name}_{split}.png", dpi=300, bbox_inches="tight")
         log.info(f"Plot saved to {fig_dir / f'exp2_component_profiling_latency_{dataset_name}_{split}.png'}")

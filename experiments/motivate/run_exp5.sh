@@ -54,7 +54,8 @@ echo "=========================================="
 python experiments/motivate/exp5_flops_vs_latency.py \
     --exp3_results "$EXP3_RESULTS" \
     --exp4_results "$EXP4_RESULTS" \
-    --output_dir "$OUTPUT_DIR"
+    --output_dir "$OUTPUT_DIR" \
+    --x_axis tokens
 
 echo ""
 echo "Exp 5 completed! Results saved to $OUTPUT_DIR"

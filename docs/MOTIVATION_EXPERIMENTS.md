@@ -4,13 +4,16 @@ This document details the "Motivation" experiments designed to systematically an
 
 ## Overview
 
-The experiments are organized into five independent experiments, each focusing on a specific aspect of VLM latency:
+The experiments are organized into six independent experiments, each focusing on a specific aspect of VLM latency:
 
 1. **Exp 1: Latency Distribution** - Measure latency distribution on real-world datasets
 2. **Exp 2: Component Profiling** - Analyze time/parameter cost of each component
 3. **Exp 3: Vision Tokens vs Latency** - Quantify the cost of vision tokens (prefill)
 4. **Exp 4: Language Tokens vs Latency** - Quantify the cost of language tokens (decode)
 5. **Exp 5: FLOPs vs Latency** - Analyze FLOPs-latency correlation
+6. **Exp 6: Crop Overlap Analysis** - Analyze how images are divided into crops and methods to control vision tokens
+
+For detailed documentation on Exp 6, see [EXP6_CROP_OVERLAP_ANALYSIS.md](./EXP6_CROP_OVERLAP_ANALYSIS.md).
 
 ## Experiment 1: Latency Distribution
 
@@ -213,6 +216,43 @@ python experiments/motivate/exp5_flops_vs_latency.py \
     --output_dir ./results/motivation/exp5
 ```
 
+## Experiment 6: Crop Overlap Analysis
+
+**Goal**: Analyze how images are divided into crops and understand methods to control vision token count.
+
+**Method**:
+- Data Source: Uses results from Exp 2 to select images with different crop counts
+- Selection: Evenly distributed across crop count range (default: 5 images)
+- Analysis: Crop boundaries, overlap statistics, and control methods
+- Visualization: Original vs stitched crops comparison with boundaries
+
+**Output**:
+- Comparison plots: Original image vs stitched crops with boundaries
+- Statistics: Overlap ratio, redundancy ratio, patch coverage
+- Crop images: Individual crops and original images saved
+- Analysis: Methods to control vision tokens
+- Visualization: `results/motivation/exp6/figures/exp6_crop_overlap_image_{id}_comparison.png`
+- Data: `results/motivation/exp6/exp6_crop_overlap_analysis.json`
+
+**Key Insights**:
+- Images are adaptively tiled based on size and `max_crops` parameter
+- Overlap varies significantly (0-40%) depending on tiling configuration
+- Resizing images is the most practical method for controlling vision tokens
+- Most images use 7 crops (not the full 12), suggesting room for optimization
+
+**Script**: `experiments/motivate/exp6_crop_overlap_analysis.py`
+
+**Usage**:
+```bash
+# Use default settings (5 images, target 12 crops)
+bash experiments/motivate/run_exp6.sh
+
+# Customize selection
+bash experiments/motivate/run_exp6.sh 0 --num_images 7 --target_max_crops 12
+```
+
+**Detailed Documentation**: See [EXP6_CROP_OVERLAP_ANALYSIS.md](./EXP6_CROP_OVERLAP_ANALYSIS.md) for comprehensive analysis and recommendations.
+
 ## Data Collection Methodology
 
 ### Image Cropping and Tiling
@@ -353,6 +393,9 @@ bash experiments/motivate/run_exp4.sh [GPU_ID] [--num_samples N] [--max_new_toke
 
 # Exp 5: FLOPs vs Latency (requires Exp 3 and 4 results)
 bash experiments/motivate/run_exp5.sh [--exp3_results PATH] [--exp4_results PATH]
+
+# Exp 6: Crop Overlap Analysis (requires Exp 2 results)
+bash experiments/motivate/run_exp6.sh [GPU_ID] [--num_images N] [--target_max_crops N]
 ```
 
 You can also run the Python scripts directly:
@@ -385,6 +428,16 @@ python experiments/motivate/exp5_flops_vs_latency.py \
     --exp3_results ./results/motivation/exp3/exp3_vision_tokens_vs_latency.json \
     --exp4_results ./results/motivation/exp4/exp4_language_tokens_vs_latency.json \
     --output_dir ./results/motivation/exp5
+
+# Exp 6: Crop Overlap Analysis (requires Exp 2 results)
+python experiments/motivate/exp6_crop_overlap_analysis.py \
+    --model_path checkpoints \
+    --dataset coco_2014_vqa \
+    --split validation \
+    --exp2_results ./results/motivation/exp2/exp2_component_profiling.json \
+    --num_images 5 \
+    --target_max_crops 12 \
+    --output_dir ./results/motivation/exp6
 ```
 
 ### Running All Experiments
@@ -401,6 +454,7 @@ This script will:
 3. Run Exp 3 (controlled scaling)
 4. Run Exp 4 (language token scaling)
 5. Run Exp 5 (FLOPs analysis, using Exp 3 and 4 results)
+6. Run Exp 6 (Crop overlap analysis, using Exp 2 results)
 
 ### Running Phase Scripts
 

@@ -142,10 +142,10 @@ class LanguageTokensVsLatencyExperiment(BaseExperiment):
         total_means = [np.mean([r["T_total"] for r in groups[mt]]) for mt in max_tokens_list]
         output_tokens_means = [np.mean([r["num_output_tokens"] for r in groups[mt]]) for mt in max_tokens_list]
 
-        # Color palette: blue for prefill, green for decode
+        # Color palette: blue for prefill, orange for decode
         colors = {
             'prefill': '#1F77B4',      # Deep blue for prefill
-            'decode': '#2CA02C',       # Deep green for decode
+            'decode': '#FF7F0E',       # Bright orange for decode
             'total': '#D62728',        # Deep red for total latency line
         }
         
@@ -188,8 +188,8 @@ class LanguageTokensVsLatencyExperiment(BaseExperiment):
             zorder=10
         )
 
-        plt.xlabel("Max Decode Output Tokens", fontsize=16)
-        plt.ylabel("Latency (seconds)", fontsize=16, labelpad=3)  # Reduce distance from axis
+        plt.xlabel("Decode Output Tokens", fontsize=16)
+        plt.ylabel("Latency (seconds, log scale)", fontsize=16, labelpad=3)  # Reduce distance from axis
         plt.title("Latency Breakdown", fontsize=18)
         # Use integer labels for x-axis
         plt.xticks(x, [int(round(v)) for v in output_tokens_means], fontsize=14)

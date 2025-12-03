@@ -43,9 +43,9 @@ def plot_latency_distribution(results: List[Dict], output_dir: Path, dataset_nam
     colors = {
         'primary': '#1F77B4',      # Deep blue
         'histogram': '#1F77B4',   # Deep blue for histograms
-        'p50': '#1F77B4',          # Deep blue for P50
+        'p50': '#D62728',          # Red for P50
         'p95': '#FF7F0E',          # Bright orange for P95
-        'p99': '#D62728',          # Deep red for P99
+        'p99': '#9467BD',          # Purple for P99
     }
     
     # Plot 1: Histogram (separate figure)
@@ -103,6 +103,7 @@ def main():
     parser.add_argument("--output_dir", type=str, default=None, help="Output directory (default: same as JSON file)")
     parser.add_argument("--dataset", type=str, default="coco_2014_vqa", help="Dataset name")
     parser.add_argument("--split", type=str, default="validation", help="Dataset split")
+    parser.add_argument("--remove_extremes", type=int, default=10, help="Number of extreme values to remove from top and bottom (default: 3)")
 
     args = parser.parse_args()
 
@@ -119,6 +120,28 @@ def main():
     if not results:
         log.error("No results found in JSON file")
         return
+
+    # Filter out extreme values (top N and bottom N)
+    original_count = len(results)
+    if args.remove_extremes > 0:
+        # Sort by T_total and remove top N and bottom N
+        results_with_latency = [(r, r.get("T_total", 0)) for r in results]
+        results_with_latency.sort(key=lambda x: x[1])
+        
+        # Log removed values
+        removed_min = results_with_latency[:args.remove_extremes]
+        removed_max = results_with_latency[-args.remove_extremes:]
+        log.info(f"Removed {args.remove_extremes} minimum values:")
+        for i, (_, latency) in enumerate(removed_min, 1):
+            log.info(f"  Min #{i}: {latency:.2f} ms")
+        log.info(f"Removed {args.remove_extremes} maximum values:")
+        for i, (_, latency) in enumerate(removed_max, 1):
+            log.info(f"  Max #{i}: {latency:.2f} ms")
+        
+        # Remove bottom N and top N
+        results = [r for r, _ in results_with_latency[args.remove_extremes:-args.remove_extremes]]
+        filtered_count = original_count - len(results)
+        log.info(f"Total removed: {filtered_count} outliers ({filtered_count/original_count*100:.4f}% of data)")
 
     # Determine output directory
     if args.output_dir:

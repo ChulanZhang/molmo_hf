@@ -53,7 +53,7 @@ def plot_vision_tokens_vs_latency(results: List[Dict], output_dir: Path):
     plt.plot(x, prefill_lats, "o-", label="Time to First Token", linewidth=2.5, markersize=8, 
             color=colors['quaternary'], zorder=10)
     
-    plt.xlabel("Vision Tokens", fontsize=16)
+    plt.xlabel("Input Vision Tokens", fontsize=16)
     plt.ylabel("Latency (ms)", fontsize=16)
     plt.title("Latency Breakdown", fontsize=18)
     plt.xticks(x, vision_tokens, fontsize=14)

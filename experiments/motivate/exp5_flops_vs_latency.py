@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Dict, List, Any
 
 import matplotlib.pyplot as plt
+from matplotlib.ticker import FuncFormatter
 import numpy as np
 from scipy.stats import linregress
 
@@ -27,8 +28,30 @@ def load_json(path: str) -> Dict:
         return json.load(f)
 
 
-def analyze_flops_vs_latency(exp3_results_path: str, exp4_results_path: str, output_dir: str):
-    """Analyze FLOPs vs Latency from Exp 3 and Exp 4 results."""
+def format_flops(x, pos):
+    """Format FLOPs as numbers without unit (unit is in axis label).
+    
+    Converts to trillions (T) for display, but only shows the number.
+    """
+    if x >= 1e12:
+        return f'{x/1e12:.1f}'
+    elif x >= 1e9:
+        return f'{x/1e9:.1f}'
+    elif x >= 1e6:
+        return f'{x/1e6:.1f}'
+    else:
+        return f'{x:.0f}'
+
+
+def analyze_flops_vs_latency(exp3_results_path: str, exp4_results_path: str, output_dir: str, x_axis: str = "flops"):
+    """Analyze FLOPs vs Latency from Exp 3 and Exp 4 results.
+    
+    Args:
+        exp3_results_path: Path to Exp 3 results JSON
+        exp4_results_path: Path to Exp 4 results JSON
+        output_dir: Output directory for plots and results
+        x_axis: X-axis type, either "flops" or "tokens" (default: "flops")
+    """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     fig_dir = output_dir / "figures"
@@ -73,30 +96,44 @@ def analyze_flops_vs_latency(exp3_results_path: str, exp4_results_path: str, out
     }
     
     # Plot 1: Vision Scaling (separate figure)
+    # Choose X-axis data
+    if x_axis == "tokens":
+        exp3_x = exp3_vision_tokens
+        exp3_x_label = "Number of input vision tokens"
+        exp3_title = None  # No title needed
+    else:
+        exp3_x = exp3_flops
+        # Determine unit based on data range
+        max_flops = max(exp3_flops) if exp3_flops else 0
+        if max_flops >= 1e12:
+            exp3_x_label = "FLOPs (T)"
+        elif max_flops >= 1e9:
+            exp3_x_label = "FLOPs (B)"
+        else:
+            exp3_x_label = "FLOPs"
+        exp3_title = None  # No title needed
+    
     plt.figure(figsize=(8, 6))
-    plt.scatter(exp3_flops, exp3_lats, s=120, color=colors['primary'], label="Vision Scaling")
-    plt.xlabel("FLOPs", fontsize=16)
+    plt.scatter(exp3_x, exp3_lats, s=120, color=colors['primary'], label="Vision Scaling")
+    plt.xlabel(exp3_x_label, fontsize=16)
     plt.ylabel("Latency (ms)", fontsize=16)
-    plt.title("FLOPs vs Latency (Vision Scaling)", fontsize=18)
+    if exp3_title:
+        plt.title(exp3_title, fontsize=18)
+    
+    # Format X-axis if showing FLOPs
+    if x_axis == "flops":
+        plt.gca().xaxis.set_major_formatter(FuncFormatter(format_flops))
+    
     plt.grid(True, alpha=0.3)
     plt.tick_params(labelsize=14)
 
     # Linear fit
-    if len(exp3_flops) > 1:
-        slope, intercept, r_value, p_value, std_err = linregress(exp3_flops, exp3_lats)
-        x_fit = np.linspace(min(exp3_flops), max(exp3_flops), 100)
+    if len(exp3_x) > 1:
+        slope, intercept, r_value, p_value, std_err = linregress(exp3_x, exp3_lats)
+        x_fit = np.linspace(min(exp3_x), max(exp3_x), 100)
         y_fit = slope * x_fit + intercept
         plt.plot(x_fit, y_fit, "r--", linewidth=2.5, label=f"Linear Fit (R²={r_value**2:.3f})")
         plt.legend(fontsize=14)
-        plt.text(
-            0.05,
-            0.95,
-            f"R² = {r_value**2:.3f}\nSlope = {slope:.2e} ms/FLOP",
-            transform=plt.gca().transAxes,
-            verticalalignment="top",
-            fontsize=14,
-            bbox=dict(boxstyle="round", facecolor="white", alpha=0.9),
-        )
 
     plt.tight_layout()
     plt.savefig(fig_dir / "exp5_flops_vs_latency_vision.png", dpi=300, bbox_inches="tight")
@@ -104,98 +141,68 @@ def analyze_flops_vs_latency(exp3_results_path: str, exp4_results_path: str, out
     plt.close()
 
     # Plot 2: Language Scaling (separate figure)
+    # Convert latencies from ms to seconds for language scaling plot
+    exp4_lats_seconds = [lat / 1000.0 for lat in exp4_lats]
+    
+    # Choose X-axis data
+    if x_axis == "tokens":
+        exp4_x = exp4_output_tokens
+        exp4_x_label = "Number of generated language tokens"
+        exp4_title = None  # No title needed
+    else:
+        exp4_x = exp4_flops
+        # Determine unit based on data range
+        max_flops = max(exp4_flops) if exp4_flops else 0
+        if max_flops >= 1e12:
+            exp4_x_label = "FLOPs (T)"
+        elif max_flops >= 1e9:
+            exp4_x_label = "FLOPs (B)"
+        else:
+            exp4_x_label = "FLOPs"
+        exp4_title = None  # No title needed
+    
     plt.figure(figsize=(8, 6))
-    plt.scatter(exp4_flops, exp4_lats, s=120, color=colors['secondary'], label="Language Scaling")
-    plt.xlabel("FLOPs", fontsize=16)
-    plt.ylabel("Latency (ms)", fontsize=16)
-    plt.title("FLOPs vs Latency (Language Scaling)", fontsize=18)
+    plt.scatter(exp4_x, exp4_lats_seconds, s=120, color=colors['tertiary'], label="Language Scaling")  # Use green color
+    plt.xlabel(exp4_x_label, fontsize=16)
+    plt.ylabel("Latency (seconds)", fontsize=16)
+    if exp4_title:
+        plt.title(exp4_title, fontsize=18)
+    
+    # Format X-axis
+    if x_axis == "flops":
+        plt.gca().xaxis.set_major_formatter(FuncFormatter(format_flops))
+    elif x_axis == "tokens":
+        # Use integer format for tokens
+        plt.gca().xaxis.set_major_formatter(FuncFormatter(lambda x, p: f'{int(x)}'))
+    
     plt.grid(True, alpha=0.3)
     plt.tick_params(labelsize=14)
 
     # Linear fit
-    if len(exp4_flops) > 1:
-        slope, intercept, r_value, p_value, std_err = linregress(exp4_flops, exp4_lats)
-        x_fit = np.linspace(min(exp4_flops), max(exp4_flops), 100)
+    if len(exp4_x) > 1:
+        slope, intercept, r_value, p_value, std_err = linregress(exp4_x, exp4_lats_seconds)
+        x_fit = np.linspace(min(exp4_x), max(exp4_x), 100)
         y_fit = slope * x_fit + intercept
         plt.plot(x_fit, y_fit, "r--", linewidth=2.5, label=f"Linear Fit (R²={r_value**2:.3f})")
         plt.legend(fontsize=14)
-        plt.text(
-            0.05,
-            0.95,
-            f"R² = {r_value**2:.3f}\nSlope = {slope:.2e} ms/FLOP",
-            transform=plt.gca().transAxes,
-            verticalalignment="top",
-            fontsize=14,
-            bbox=dict(boxstyle="round", facecolor="white", alpha=0.9),
-        )
 
     plt.tight_layout()
     plt.savefig(fig_dir / "exp5_flops_vs_latency_language.png", dpi=300, bbox_inches="tight")
     log.info(f"Plot saved to {fig_dir / 'exp5_flops_vs_latency_language.png'}")
     plt.close()
 
-    # Plot 3: Combined (separate figure)
-    plt.figure(figsize=(8, 6))
-    plt.scatter(exp3_flops, exp3_lats, s=120, color=colors['primary'], label="Vision Scaling")
-    plt.scatter(exp4_flops, exp4_lats, s=120, color=colors['secondary'], label="Language Scaling")
-    plt.xlabel("FLOPs", fontsize=16)
-    plt.ylabel("Latency (ms)", fontsize=16)
-    plt.title("FLOPs vs Latency (Combined)", fontsize=18)
-    plt.legend(fontsize=14)
-    plt.grid(True, alpha=0.3)
-    plt.tick_params(labelsize=14)
-
-    # Combined linear fit
-    all_flops = exp3_flops + exp4_flops
-    all_lats = exp3_lats + exp4_lats
-    if len(all_flops) > 1:
-        slope, intercept, r_value, p_value, std_err = linregress(all_flops, all_lats)
-        x_fit = np.linspace(min(all_flops), max(all_flops), 100)
-        y_fit = slope * x_fit + intercept
-        plt.plot(x_fit, y_fit, "r--", linewidth=2.5, label=f"Linear Fit (R²={r_value**2:.3f})")
-        plt.legend(fontsize=14)
-        plt.text(
-            0.05,
-            0.95,
-            f"Combined R² = {r_value**2:.3f}\nSlope = {slope:.2e} ms/FLOP",
-            transform=plt.gca().transAxes,
-            verticalalignment="top",
-            fontsize=14,
-            bbox=dict(boxstyle="round", facecolor="white", alpha=0.9),
-        )
-
-    plt.tight_layout()
-    plt.savefig(fig_dir / "exp5_flops_vs_latency_combined.png", dpi=300, bbox_inches="tight")
-    log.info(f"Plot saved to {fig_dir / 'exp5_flops_vs_latency_combined.png'}")
-    plt.close()
-
     # Compute and save statistics
     stats = {}
-    if len(exp3_flops) > 1:
-        slope, intercept, r_value, p_value, std_err = linregress(exp3_flops, exp3_lats)
+    if len(exp3_x) > 1:
+        slope, intercept, r_value, p_value, std_err = linregress(exp3_x, exp3_lats)
         stats["exp3"] = {
             "r_squared": float(r_value**2),
-            "correlation": float(r_value),
-            "slope": float(slope),
-            "p_value": float(p_value),
         }
 
-    if len(exp4_flops) > 1:
-        slope, intercept, r_value, p_value, std_err = linregress(exp4_flops, exp4_lats)
+    if len(exp4_x) > 1:
+        slope, intercept, r_value, p_value, std_err = linregress(exp4_x, exp4_lats_seconds)
         stats["exp4"] = {
             "r_squared": float(r_value**2),
-            "correlation": float(r_value),
-            "slope": float(slope),
-            "p_value": float(p_value),
-        }
-
-    if len(all_flops) > 1:
-        slope, intercept, r_value, p_value, std_err = linregress(all_flops, all_lats)
-        stats["combined"] = {
-            "r_squared": float(r_value**2),
-            "correlation": float(r_value),
-            "slope": float(slope),
-            "p_value": float(p_value),
         }
 
     # Save results
@@ -225,8 +232,6 @@ def analyze_flops_vs_latency(exp3_results_path: str, exp4_results_path: str, out
         log.info(f"  Exp 3 (Vision): R² = {stats['exp3']['r_squared']:.3f}")
     if "exp4" in stats:
         log.info(f"  Exp 4 (Language): R² = {stats['exp4']['r_squared']:.3f}")
-    if "combined" in stats:
-        log.info(f"  Combined: R² = {stats['combined']['r_squared']:.3f}")
     log.info("=" * 60)
 
 
@@ -245,10 +250,17 @@ def main():
         help="Path to Exp 4 results JSON file",
     )
     parser.add_argument("--output_dir", type=str, default="./results/motivation/exp5", help="Output directory")
+    parser.add_argument(
+        "--x_axis",
+        type=str,
+        default="flops",
+        choices=["flops", "tokens"],
+        help="X-axis type: 'flops' or 'tokens' (default: 'flops')",
+    )
 
     args = parser.parse_args()
 
-    analyze_flops_vs_latency(args.exp3_results, args.exp4_results, args.output_dir)
+    analyze_flops_vs_latency(args.exp3_results, args.exp4_results, args.output_dir, args.x_axis)
 
 
 if __name__ == "__main__":
