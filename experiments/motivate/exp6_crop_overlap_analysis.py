@@ -15,7 +15,7 @@ from PIL import Image
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 
-from experiments.motivate.base_experiment import BaseExperiment, Timer
+from experiments.base_experiment import BaseExperiment, Timer
 
 log = logging.getLogger(__name__)
 

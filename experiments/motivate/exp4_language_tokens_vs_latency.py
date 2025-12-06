@@ -17,7 +17,7 @@ from matplotlib.ticker import FuncFormatter
 import numpy as np
 from tqdm import tqdm
 
-from experiments.motivate.base_experiment import BaseExperiment, Timer
+from experiments.base_experiment import BaseExperiment, Timer
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)

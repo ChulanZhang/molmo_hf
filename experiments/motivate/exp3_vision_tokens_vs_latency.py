@@ -17,7 +17,7 @@ import numpy as np
 import torch
 from PIL import Image
 
-from experiments.motivate.base_experiment import BaseExperiment, Timer
+from experiments.base_experiment import BaseExperiment, Timer
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
