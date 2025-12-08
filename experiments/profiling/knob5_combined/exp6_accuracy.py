@@ -11,6 +11,7 @@ import logging
 import sys
 import os
 import time
+from pathlib import Path
 from typing import Dict, List, Any, Optional, Tuple
 import itertools
 
@@ -25,7 +26,7 @@ from tqdm import tqdm
 from torch.utils.data import DistributedSampler
 
 sys.path.append(os.getcwd())
-from experiments.base_experiment import BaseExperiment
+from experiments.base_experiment import BaseExperiment, get_metric_for_dataset
 from molmo.models.modeling_molmoe import MolmoeSparseMoeBlock
 from molmo.torch_util import get_world_size, get_global_rank, get_local_rank
 
@@ -57,6 +58,7 @@ class Exp6LatencyExperiment(BaseExperiment):
         output_dir: str = "./results",
         num_warmup: int = 3,
         hf_cache_dir: Optional[str] = None,
+        dataset_name: str = "coco_2014_vqa",
     ):
         # Auto-detect distributed environment (set by torchrun)
         if "RANK" in os.environ and "WORLD_SIZE" in os.environ:
@@ -84,6 +86,13 @@ class Exp6LatencyExperiment(BaseExperiment):
             torch.cuda.set_device(local_rank)
             log.info(f"Rank {self.rank} (local_rank {local_rank}) using device {device}")
         
+        # Adjust output_dir to include dataset name to avoid conflicts between datasets
+        # Always add dataset suffix (even for coco_2014_vqa) to ensure clear separation
+        base_output_dir = Path(output_dir)
+        dataset_suffix = dataset_name.replace("_", "-")
+        output_dir = str(base_output_dir.parent / f"{base_output_dir.name}_{dataset_suffix}")
+        log.info(f"Output directory adjusted to include dataset name: {output_dir}")
+        
         super().__init__(
             model_path=model_path,
             device=device,
@@ -91,6 +100,7 @@ class Exp6LatencyExperiment(BaseExperiment):
             num_warmup=num_warmup,
             hf_cache_dir=hf_cache_dir,
         )
+        self.dataset_name = dataset_name
     
     def _generate_sparse_combinations(
         self,
@@ -140,12 +150,25 @@ class Exp6LatencyExperiment(BaseExperiment):
         
         elif sampling_strategy == "balanced":
             # Balanced sampling: ensure each dimension is well-represented
-            # max_crops: [2, 6, 10] (3 values, max 10)
-            # top_k: [4, 8, 12] (3 values, max 12)
-            # blocks: [12, 14, 16] (3 values, min 12, max 16)
-            sparse_max_crops = [2, 6, 10]
-            sparse_top_k = [4, 8, 12]
-            sparse_blocks = [12, 14, 16]
+            # Select values that evenly cover each dimension from the provided lists
+            # Use min, middle, max for each dimension
+            if len(max_crops_list) >= 3:
+                sparse_max_crops = [max_crops_list[0], max_crops_list[len(max_crops_list)//2], max_crops_list[-1]]
+            else:
+                sparse_max_crops = max_crops_list
+            
+            if len(top_k_list) >= 3:
+                # Select min, middle, max
+                sparse_top_k = [top_k_list[0], top_k_list[len(top_k_list)//2], top_k_list[-1]]
+            elif len(top_k_list) == 2:
+                sparse_top_k = top_k_list
+            else:
+                sparse_top_k = top_k_list
+            
+            if len(num_active_blocks_list) >= 3:
+                sparse_blocks = [num_active_blocks_list[0], num_active_blocks_list[len(num_active_blocks_list)//2], num_active_blocks_list[-1]]
+            else:
+                sparse_blocks = num_active_blocks_list
             
             combinations = list(itertools.product(sparse_max_crops, sparse_top_k, sparse_blocks))
             log.info(f"Balanced sampling: {len(combinations)} combinations")
@@ -259,7 +282,7 @@ class Exp6LatencyExperiment(BaseExperiment):
         dataset_name: str = "coco_2014_vqa",
         split: str = "validation",
         max_new_tokens: int = 16,
-        num_samples: int = 5000,
+        num_samples: Optional[int] = None,
         max_crops_list: List[int] = None,
         top_k_list: List[int] = None,
         num_active_blocks_list: List[int] = None,
@@ -272,7 +295,7 @@ class Exp6LatencyExperiment(BaseExperiment):
             dataset_name: Dataset name (default: "coco_2014_vqa")
             split: Dataset split (default: "validation")
             max_new_tokens: Maximum tokens to generate
-            num_samples: Number of samples to measure (default: 5000, total across all ranks)
+            num_samples: Number of samples to measure (default: None = use all samples)
             max_crops_list: List of max_crops values (default: [2, 4, 6, 8, 10], max 10)
             top_k_list: List of top_k values (default: [4, 8, 12], 3挡位, max 12)
             num_active_blocks_list: List of num_active_blocks values (default: [12, 13, 14, 15, 16], min 12, max 16)
@@ -303,9 +326,18 @@ class Exp6LatencyExperiment(BaseExperiment):
         
         log.info(f"Testing {len(combinations)} combinations")
         log.info(f"Sampling strategy: {sampling_strategy}")
+        log.info(f"=" * 80)
+        log.info(f"CRITICAL: Exp6 uses batch_size=1 (FIXED, cannot be changed)")
+        log.info(f"  - This is essential for accurate per-sample latency measurement")
+        log.info(f"  - DO NOT use auto_adjust_batch_size or any batch size optimization")
+        log.info(f"  - Each sample is processed individually to measure its latency")
+        log.info(f"=" * 80)
         log.info(f"Batch size: 1 (fixed for accurate per-sample latency measurement)")
-        log.info(f"Number of samples per rank: {num_samples // self.world_size if self.is_distributed else num_samples}")
-        log.info(f"Total samples across all ranks: {num_samples}")
+        if num_samples is not None:
+            log.info(f"Number of samples per rank: {num_samples // self.world_size if self.is_distributed else num_samples}")
+            log.info(f"Total samples across all ranks: {num_samples} (limited)")
+        else:
+            log.info(f"Using ALL samples from dataset (num_samples=None)")
         
         results_data = []
         mask_wrapper = None
@@ -321,6 +353,53 @@ class Exp6LatencyExperiment(BaseExperiment):
         
         try:
             for config_idx, (max_crops, top_k, num_active) in enumerate(combinations):
+                # Check if result already exists (only rank 0 checks, then broadcasts to others)
+                should_skip = False
+                if not self.is_distributed or self.rank == 0:
+                    # Check for merged result file (preferred) or individual rank file
+                    merged_filename = f"exp6_latency_crops{max_crops}_topk{top_k}_blocks{num_active}.json"
+                    merged_filepath = Path(self.output_dir) / merged_filename
+                    
+                    if merged_filepath.exists() and merged_filepath.stat().st_size > 0:
+                        should_skip = True
+                        log.info(f"=" * 80)
+                        log.info(f"Configuration {config_idx + 1}/{len(combinations)}: "
+                                f"max_crops={max_crops}, top_k={top_k}, num_active_blocks={num_active}/{total_blocks}")
+                        log.info(f"✓ Result file already exists: {merged_filename}")
+                        log.info(f"  Skipping this configuration...")
+                        log.info(f"=" * 80)
+                
+                # Broadcast skip decision to all ranks in distributed mode
+                if self.is_distributed:
+                    skip_tensor = torch.tensor([1 if should_skip else 0], dtype=torch.int, device=self.device)
+                    dist.broadcast(skip_tensor, src=0)
+                    should_skip = bool(skip_tensor.item())
+                
+                if should_skip:
+                    # Load existing result to include in final summary
+                    if not self.is_distributed or self.rank == 0:
+                        try:
+                            with open(merged_filepath, 'r') as f:
+                                existing_data = json.load(f)
+                            if "summary" in existing_data and len(existing_data["summary"]) > 0:
+                                summary_entry = existing_data["summary"][0]
+                                results_data.append({
+                                    "max_crops": max_crops,
+                                    "top_k": top_k,
+                                    "num_active_blocks": num_active,
+                                    "num_total_blocks": total_blocks,
+                                    "active_block_indices": summary_entry.get("active_block_indices", []),
+                                    "accuracy": summary_entry.get("accuracy", 0.0),
+                                    "num_samples": summary_entry.get("num_samples", 0),
+                                    "latency_total_ms": summary_entry.get("latency_total_ms", {}),
+                                    "latency_prefill_ms": summary_entry.get("latency_prefill_ms", {}),
+                                    "latency_decode_ms": summary_entry.get("latency_decode_ms", {}),
+                                    "per_sample_latencies": existing_data.get("per_sample_latencies", []),
+                                })
+                        except Exception as e:
+                            log.warning(f"Failed to load existing result file {merged_filename}: {e}")
+                    continue
+                
                 if not self.is_distributed or self.rank == 0:
                     log.info(f"=" * 80)
                     log.info(f"Configuration {config_idx + 1}/{len(combinations)}: "
@@ -383,6 +462,8 @@ class Exp6LatencyExperiment(BaseExperiment):
                     sampler = None
                     shuffle = False
                 
+                # CRITICAL: exp6 uses batch_size=1 for accurate per-sample latency measurement
+                # DO NOT change this - it's essential for latency profiling
                 dataloader = torch.utils.data.DataLoader(
                     det_dataset,
                     batch_size=1,  # Fixed batch size for accurate latency measurement
@@ -399,6 +480,43 @@ class Exp6LatencyExperiment(BaseExperiment):
                     prefetch_factor=2,
                     persistent_workers=True,
                 )
+                
+                # Verify batch size is 1 (critical for exp6)
+                if not self.is_distributed or self.rank == 0:
+                    log.info(f"✓ DataLoader created with batch_size=1 (fixed for latency measurement)")
+                    # Verify by checking DataLoader's batch_sampler (without consuming a batch)
+                    if hasattr(dataloader, 'batch_sampler') and hasattr(dataloader.batch_sampler, 'batch_size'):
+                        actual_batch_size = dataloader.batch_sampler.batch_size
+                        if actual_batch_size != 1:
+                            log.error(f"✗ ERROR: DataLoader batch_size is {actual_batch_size}, expected 1!")
+                            raise ValueError(f"DataLoader batch_size must be 1 for exp6, but got {actual_batch_size}")
+                        log.info(f"✓ Verified: DataLoader batch_size={actual_batch_size} (correct)")
+                    else:
+                        # Fallback: check first batch (will be consumed, but that's okay for verification)
+                        test_iter = iter(dataloader)
+                        test_batch = next(test_iter)
+                        actual_batch_size = test_batch["input_ids"].shape[0] if "input_ids" in test_batch else 1
+                        if actual_batch_size != 1:
+                            log.error(f"✗ ERROR: First batch has batch_size={actual_batch_size}, expected 1!")
+                            raise ValueError(f"DataLoader batch_size must be 1 for exp6, but got {actual_batch_size}")
+                        log.info(f"✓ Verified: First batch has batch_size={actual_batch_size} (correct)")
+                        # Recreate dataloader since we consumed the first batch
+                        dataloader = torch.utils.data.DataLoader(
+                            det_dataset,
+                            batch_size=1,
+                            shuffle=shuffle,
+                            sampler=sampler,
+                            collate_fn=MMCollator(
+                                max_sequence_length=1536,
+                                include_metadata=True,
+                                pad=True,
+                                max_crops=max_crops
+                            ),
+                            num_workers=4,
+                            pin_memory=True,
+                            prefetch_factor=2,
+                            persistent_workers=True,
+                        )
                 
                 all_latencies_total = []
                 all_latencies_prefill = []
@@ -447,11 +565,23 @@ class Exp6LatencyExperiment(BaseExperiment):
                 
                 # Measure latency for each sample
                 # In distributed mode, each rank processes num_samples // world_size samples
-                num_samples_per_rank = num_samples // self.world_size if self.is_distributed else num_samples
+                # If num_samples is None, use all samples
+                if num_samples is not None:
+                    num_samples_per_rank = num_samples // self.world_size if self.is_distributed else num_samples
+                    total_batches = min(num_samples_per_rank, len(dataloader))
+                else:
+                    num_samples_per_rank = None
+                    total_batches = len(dataloader)
+                
+                if not self.is_distributed or self.rank == 0:
+                    if num_samples is not None:
+                        log.info(f"Processing {num_samples_per_rank} samples per rank ({num_samples} total)")
+                    else:
+                        log.info(f"Processing all {len(dataloader)} samples from dataset")
                 
                 with torch.inference_mode():
-                    for sample_idx, batch in enumerate(tqdm(dataloader, total=min(num_samples_per_rank, len(dataloader)))):
-                        if sample_idx >= num_samples_per_rank:
+                    for sample_idx, batch in enumerate(tqdm(dataloader, total=total_batches)):
+                        if num_samples is not None and sample_idx >= num_samples_per_rank:
                             break
                         
                         batch = {k: v.to(self.device, non_blocking=True) if isinstance(v, torch.Tensor) else v 
@@ -561,11 +691,12 @@ class Exp6LatencyExperiment(BaseExperiment):
                             num_input_text_tokens = int(batch["input_ids"].shape[1])
                             num_output_tokens = int(output.shape[1] - batch["input_ids"].shape[1]) if output.shape[1] > batch["input_ids"].shape[1] else 0
                             
-                            # Compute accuracy for this batch
+                            # Get appropriate metric for dataset
+                            metric_name = get_metric_for_dataset(self.dataset_name)
                             batch_accuracy = self.compute_accuracy(
                                 batch=batch,
                                 predictions=output,
-                                metric_name="vqa_score",
+                                metric_name=metric_name,
                             )
                             
                             # Collect scores and predictions
@@ -876,8 +1007,8 @@ def main():
     parser.add_argument("--split", type=str, default="validation")
     parser.add_argument("--max_new_tokens", type=int, default=16,
                        help="Maximum tokens to generate (default: 16, optimized for VQA)")
-    parser.add_argument("--num_samples", type=int, default=5000,
-                       help="Total number of samples to measure across all ranks (default: 5000)")
+    parser.add_argument("--num_samples", type=int, default=None,
+                       help="Total number of samples to measure across all ranks (default: None = use all samples)")
     parser.add_argument("--max_crops", type=int, nargs="+", default=None,
                        help="List of max_crops values (default: [2, 4, 6, 8, 10], max 10)")
     parser.add_argument("--top_k", type=int, nargs="+", default=None,
@@ -892,16 +1023,27 @@ def main():
     
     logging.basicConfig(level=logging.INFO)
     
+    # Determine split based on dataset
+    split = args.split
+    if args.dataset_name == "tally_qa":
+        # TallyQA only has train and test, use test for validation
+        split = "test"
+        log.info(f"TallyQA dataset: using 'test' split instead of 'validation'")
+    
     experiment = Exp6LatencyExperiment(
         model_path=args.model_path,
-        output_dir=args.output_dir
+        output_dir=args.output_dir,
+        dataset_name=args.dataset_name
     )
+    
+    # Convert num_samples: None means use all samples
+    num_samples = args.num_samples if args.num_samples is not None else None
     
     experiment.run(
         dataset_name=args.dataset_name,
-        split=args.split,
+        split=split,
         max_new_tokens=args.max_new_tokens,
-        num_samples=args.num_samples,
+        num_samples=num_samples,
         max_crops_list=args.max_crops,
         top_k_list=args.top_k,
         num_active_blocks_list=args.num_active_blocks,

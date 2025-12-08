@@ -9,6 +9,9 @@ import logging
 import sys
 import os
 import time
+import json
+import glob
+from pathlib import Path
 from typing import Dict, List, Any, Optional, Tuple
 import itertools
 
@@ -23,7 +26,7 @@ from tqdm import tqdm
 from torch.utils.data import DistributedSampler
 
 sys.path.append(os.getcwd())
-from experiments.base_experiment import BaseExperiment
+from experiments.base_experiment import BaseExperiment, get_metric_for_dataset
 from molmo.models.modeling_molmoe import MolmoeSparseMoeBlock
 from molmo.torch_util import get_world_size, get_global_rank, get_local_rank
 
@@ -54,6 +57,7 @@ class Exp5AccuracyExperiment(BaseExperiment):
         output_dir: str = "./results",
         num_warmup: int = 3,
         hf_cache_dir: Optional[str] = None,
+        dataset_name: str = "coco_2014_vqa",
     ):
         # Auto-detect distributed environment (set by torchrun)
         if "RANK" in os.environ and "WORLD_SIZE" in os.environ:
@@ -81,6 +85,13 @@ class Exp5AccuracyExperiment(BaseExperiment):
             torch.cuda.set_device(local_rank)
             log.info(f"Rank {self.rank} (local_rank {local_rank}) using device {device}")
         
+        # Adjust output_dir to include dataset name to avoid conflicts between datasets
+        # Always add dataset suffix (even for coco_2014_vqa) to ensure clear separation
+        base_output_dir = Path(output_dir)
+        dataset_suffix = dataset_name.replace("_", "-")
+        output_dir = str(base_output_dir.parent / f"{base_output_dir.name}_{dataset_suffix}")
+        log.info(f"Output directory adjusted to include dataset name: {output_dir}")
+        
         super().__init__(
             model_path=model_path,
             device=device,
@@ -88,6 +99,7 @@ class Exp5AccuracyExperiment(BaseExperiment):
             num_warmup=num_warmup,
             hf_cache_dir=hf_cache_dir,
         )
+        self.dataset_name = dataset_name
     
     def _generate_sparse_combinations(
         self,
@@ -156,13 +168,25 @@ class Exp5AccuracyExperiment(BaseExperiment):
         
         elif sampling_strategy == "balanced":
             # Balanced sampling: ensure each dimension is well-represented
-            # Select values that evenly cover each dimension
-            # max_crops: [2, 6, 12] (3 values)
-            # top_k: [4, 12, 20, 32] (4 values, including default 8 if close)
-            # blocks: [8, 12, 16] (3 values)
-            sparse_max_crops = [2, 6, 12]
-            sparse_top_k = [4, 12, 20, 32]  # Skip 8, use 12 as close alternative
-            sparse_blocks = [8, 12, 16]
+            # Select values that evenly cover each dimension from the provided lists
+            # Use min, middle, max for each dimension
+            if len(max_crops_list) >= 3:
+                sparse_max_crops = [max_crops_list[0], max_crops_list[len(max_crops_list)//2], max_crops_list[-1]]
+            else:
+                sparse_max_crops = max_crops_list
+            
+            if len(top_k_list) >= 3:
+                # Select min, middle, max
+                sparse_top_k = [top_k_list[0], top_k_list[len(top_k_list)//2], top_k_list[-1]]
+            elif len(top_k_list) == 2:
+                sparse_top_k = top_k_list
+            else:
+                sparse_top_k = top_k_list
+            
+            if len(num_active_blocks_list) >= 3:
+                sparse_blocks = [num_active_blocks_list[0], num_active_blocks_list[len(num_active_blocks_list)//2], num_active_blocks_list[-1]]
+            else:
+                sparse_blocks = num_active_blocks_list
             
             combinations = list(itertools.product(sparse_max_crops, sparse_top_k, sparse_blocks))
             log.info(f"Balanced sampling: {len(combinations)} combinations")
@@ -409,9 +433,10 @@ class Exp5AccuracyExperiment(BaseExperiment):
                              for k, v in test_batch.items()}
                 
                 # Try a forward pass AND a short generation to check memory
+                # Use the same settings as actual inference
                 with torch.inference_mode():
                     with torch.autocast("cuda", enabled=True, dtype=torch.bfloat16):
-                        # First do a forward pass
+                        # First do a forward pass to warm up
                         _ = self.model(
                             input_ids=test_batch["input_ids"],
                             images=test_batch.get("images"),
@@ -419,7 +444,11 @@ class Exp5AccuracyExperiment(BaseExperiment):
                             image_input_idx=test_batch.get("image_input_idx"),
                         )
                         
-                        # Then try a short generation (this uses more memory)
+                        # Clear cache after forward pass
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
+                        
+                        # Then try a short generation (this uses more memory, especially with KV cache)
                         from transformers import GenerationConfig
                         eos_token_id = self.tokenizer.eos_token_id
                         if eos_token_id is None:
@@ -432,12 +461,12 @@ class Exp5AccuracyExperiment(BaseExperiment):
                         test_gen_config = GenerationConfig(
                             max_new_tokens=16,
                             do_sample=False,
-                            use_cache=True,
+                            use_cache=True,  # Use cache to simulate actual inference
                             eos_token_id=eos_token_id,
                             pad_token_id=pad_token_id,
                         )
                         
-                        # Try generating to check memory
+                        # Try generating to check memory (this is the memory-intensive part)
                         _ = self.model.generate(
                             input_ids=test_batch["input_ids"],
                             images=test_batch.get("images"),
@@ -445,6 +474,11 @@ class Exp5AccuracyExperiment(BaseExperiment):
                             image_input_idx=test_batch.get("image_input_idx"),
                             generation_config=test_gen_config,
                         )
+                        
+                        # Clear cache after generation
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
+                            torch.cuda.synchronize()
                 
                 # If we get here, it worked!
                 min_working = current_batch_size
@@ -459,8 +493,8 @@ class Exp5AccuracyExperiment(BaseExperiment):
                         log.info(f"  Trying larger batch size: {current_batch_size}...")
                         continue
                 
-                # Found a working size, return it
-                return min_working
+                # Found a working size, will apply safety margin and sync at the end
+                break
                 
             except RuntimeError as e:
                 error_str = str(e).lower()
@@ -491,13 +525,165 @@ class Exp5AccuracyExperiment(BaseExperiment):
         
         # Return the last working size, or the smallest we tried
         if min_working is not None:
+            # Apply safety margin: reduce by 15% to account for memory fragmentation
+            # and variations between ranks in distributed mode
+            safety_margin = 0.85  # Use 85% of the working size
+            safe_batch_size = max(1, int(min_working * safety_margin))
+            if safe_batch_size < min_working:
+                log.info(f"Applying safety margin: reducing batch size from {min_working} to {safe_batch_size} "
+                        f"({int(safety_margin * 100)}%) to account for memory fragmentation and distributed variations")
+                min_working = safe_batch_size
+            
+            # In distributed mode, ensure all ranks use the same (safe) batch size
+            # Sync after all ranks have completed their testing
+            if self.is_distributed:
+                import torch.distributed as dist
+                try:
+                    # Use barrier to ensure all ranks have finished testing
+                    dist.barrier()
+                    
+                    # Now sync the batch sizes
+                    safe_sizes = [min_working] * self.world_size
+                    dist.all_gather_object(safe_sizes, min_working)
+                    min_working = min(safe_sizes)  # Use the minimum across all ranks
+                    if self.rank == 0:
+                        log.info(f"All ranks synchronized: using batch size {min_working}")
+                except Exception as e:
+                    log.warning(f"Rank {self.rank}: Failed to synchronize batch sizes: {e}")
+                    log.warning(f"Rank {self.rank}: Using local batch size {min_working} (may differ across ranks)")
+                    # Continue with local batch size if sync fails
+            
             log.info(f"Using batch size {min_working} for "
                     f"max_crops={max_crops}, top_k={top_k}, num_active_blocks={num_active_blocks}")
             return min_working
         else:
             log.warning(f"Could not find working batch size after {max_attempts} attempts, "
                        f"using {current_batch_size} (may cause OOM)")
-            return max(1, current_batch_size)
+            # Apply safety margin even for fallback
+            safety_margin = 0.85
+            safe_batch_size = max(1, int(current_batch_size * safety_margin))
+            
+            # In distributed mode, try to sync even for fallback
+            if self.is_distributed:
+                import torch.distributed as dist
+                try:
+                    dist.barrier()
+                    fallback_sizes = [safe_batch_size] * self.world_size
+                    dist.all_gather_object(fallback_sizes, safe_batch_size)
+                    safe_batch_size = min(fallback_sizes)
+                except Exception as e:
+                    log.warning(f"Rank {self.rank}: Failed to synchronize fallback batch sizes: {e}")
+            
+            return safe_batch_size
+    
+    def _manual_merge_from_files(self) -> List[Dict[str, Any]]:
+        """Manually merge results from saved rank files when gather fails."""
+        merged_results = []
+        output_dir = Path(self.output_dir)
+        
+        # Find all rank-specific result files
+        pattern = str(output_dir / "exp5_accuracy_results_crops*_topk*_blocks*_rank*.json")
+        rank_files = glob.glob(pattern)
+        
+        if not rank_files:
+            log.warning("No rank-specific result files found for manual merge")
+            return []
+        
+        # Group files by configuration (max_crops, top_k, num_active_blocks)
+        config_files = {}
+        for filepath in rank_files:
+            filename = os.path.basename(filepath)
+            # Extract config from filename: exp5_accuracy_results_crops{max_crops}_topk{top_k}_blocks{num_active}_rank{rank}.json
+            try:
+                parts = filename.replace("exp5_accuracy_results_", "").replace(".json", "").split("_")
+                max_crops = None
+                top_k = None
+                num_active = None
+                rank = None
+                
+                for i, part in enumerate(parts):
+                    if part == "crops" and i + 1 < len(parts):
+                        max_crops = int(parts[i + 1])
+                    elif part == "topk" and i + 1 < len(parts):
+                        top_k = int(parts[i + 1])
+                    elif part == "blocks" and i + 1 < len(parts):
+                        num_active = int(parts[i + 1])
+                    elif part == "rank" and i + 1 < len(parts):
+                        rank = int(parts[i + 1])
+                
+                if max_crops is not None and top_k is not None and num_active is not None:
+                    key = (max_crops, top_k, num_active)
+                    if key not in config_files:
+                        config_files[key] = []
+                    config_files[key].append((rank, filepath))
+            except Exception as e:
+                log.warning(f"Failed to parse filename {filename}: {e}")
+                continue
+        
+        # Merge results for each configuration
+        for (max_crops, top_k, num_active), files in config_files.items():
+            all_per_sample_scores = []
+            all_predictions = []
+            all_answers = []
+            num_total_blocks = None
+            active_block_indices = None
+            
+            for rank, filepath in files:
+                try:
+                    with open(filepath, 'r') as f:
+                        data = json.load(f)
+                    
+                    # Extract per-sample scores from the saved file
+                    if "all_samples" in data:
+                        for sample in data["all_samples"]:
+                            all_per_sample_scores.append({
+                                "sample_id": sample.get("sample_id", len(all_per_sample_scores)),
+                                "score": sample.get("score", 0.0),
+                                "pred": sample.get("pred", ""),
+                                "answer_idx": sample.get("answer_idx"),
+                                "predicted_idx": sample.get("predicted_idx"),
+                                "options": sample.get("options", []),
+                            })
+                    elif "per_sample_scores" in data:
+                        all_per_sample_scores.extend(data["per_sample_scores"])
+                    
+                    if "all_predictions" in data:
+                        all_predictions.extend(data["all_predictions"])
+                    if "all_answers" in data:
+                        all_answers.extend(data["all_answers"])
+                    
+                    # Extract config info
+                    if "config" in data:
+                        if num_total_blocks is None:
+                            num_total_blocks = data["config"].get("num_total_blocks")
+                        if active_block_indices is None:
+                            active_block_indices = data["config"].get("active_block_indices", [])
+                    
+                    log.info(f"Merged data from rank {rank} file: {os.path.basename(filepath)}")
+                except Exception as e:
+                    log.warning(f"Failed to load file {filepath}: {e}")
+                    continue
+            
+            if all_per_sample_scores:
+                all_scores = [s["score"] for s in all_per_sample_scores]
+                merged_accuracy = np.mean(all_scores) if all_scores else 0.0
+                merged_std = np.std(all_scores) if all_scores else 0.0
+                
+                merged_results.append({
+                    "max_crops": max_crops,
+                    "top_k": top_k,
+                    "num_active_blocks": num_active,
+                    "num_total_blocks": num_total_blocks or 16,
+                    "active_block_indices": active_block_indices or [],
+                    "accuracy": float(merged_accuracy),
+                    "std": float(merged_std),
+                    "num_samples": len(all_per_sample_scores),
+                    "per_sample_scores": all_per_sample_scores,
+                    "all_predictions": all_predictions,
+                    "all_answers": all_answers,
+                })
+        
+        return merged_results
     
     def run(
         self,
@@ -510,6 +696,7 @@ class Exp5AccuracyExperiment(BaseExperiment):
         num_active_blocks_list: List[int] = None,
         sampling_strategy: str = "balanced",
         auto_adjust_batch_size: bool = True,
+        num_samples: Optional[int] = None,
     ):
         """
         Run Exp5 accuracy measurement with combined knobs.
@@ -581,6 +768,51 @@ class Exp5AccuracyExperiment(BaseExperiment):
         
         try:
             for config_idx, (max_crops, top_k, num_active) in enumerate(combinations):
+                # Check if result already exists (only rank 0 checks, then broadcasts to others)
+                should_skip = False
+                if not self.is_distributed or self.rank == 0:
+                    # Check for merged result file (preferred) or individual rank file
+                    merged_filename = f"exp5_accuracy_results_crops{max_crops}_topk{top_k}_blocks{num_active}.json"
+                    merged_filepath = Path(self.output_dir) / merged_filename
+                    
+                    if merged_filepath.exists() and merged_filepath.stat().st_size > 0:
+                        should_skip = True
+                        log.info(f"=" * 80)
+                        log.info(f"Configuration {config_idx + 1}/{len(combinations)}: "
+                                f"max_crops={max_crops}, top_k={top_k}, num_active_blocks={num_active}/{total_blocks}")
+                        log.info(f"✓ Result file already exists: {merged_filename}")
+                        log.info(f"  Skipping this configuration...")
+                        log.info(f"=" * 80)
+                
+                # Broadcast skip decision to all ranks in distributed mode
+                if self.is_distributed:
+                    skip_tensor = torch.tensor([1 if should_skip else 0], dtype=torch.int, device=self.device)
+                    dist.broadcast(skip_tensor, src=0)
+                    should_skip = bool(skip_tensor.item())
+                
+                if should_skip:
+                    # Load existing result to include in final summary
+                    if not self.is_distributed or self.rank == 0:
+                        try:
+                            with open(merged_filepath, 'r') as f:
+                                existing_data = json.load(f)
+                            if "summary" in existing_data and len(existing_data["summary"]) > 0:
+                                summary_entry = existing_data["summary"][0]
+                                results_data.append({
+                                    "max_crops": max_crops,
+                                    "top_k": top_k,
+                                    "num_active_blocks": num_active,
+                                    "num_total_blocks": total_blocks,
+                                    "active_block_indices": existing_data.get("config", {}).get("active_block_indices", []),
+                                    "accuracy": summary_entry.get("accuracy", 0.0),
+                                    "num_samples": summary_entry.get("num_samples", 0),
+                                    "std": summary_entry.get("std", 0.0),
+                                    "per_sample_scores": existing_data.get("all_samples", []),
+                                })
+                        except Exception as e:
+                            log.warning(f"Failed to load existing result file {merged_filename}: {e}")
+                    continue
+                
                 log.info(f"=" * 80)
                 log.info(f"Configuration {config_idx + 1}/{len(combinations)}: "
                         f"max_crops={max_crops}, top_k={top_k}, num_active_blocks={num_active}/{total_blocks}")
@@ -737,8 +969,21 @@ class Exp5AccuracyExperiment(BaseExperiment):
                 
                 log.info(f"Measuring accuracy for max_crops={max_crops}, top_k={top_k}, num_active_blocks={num_active}...")
                 
+                # Calculate samples per rank if num_samples is specified
+                if num_samples is not None:
+                    samples_per_rank = num_samples // self.world_size if self.is_distributed else num_samples
+                    total_batches_needed = (samples_per_rank + current_batch_size - 1) // current_batch_size
+                    log.info(f"Limiting to {samples_per_rank} samples per rank ({num_samples} total)")
+                else:
+                    samples_per_rank = None
+                    total_batches_needed = len(dataloader)
+                
                 with torch.inference_mode():
-                    for batch_idx, batch in enumerate(tqdm(dataloader, total=len(dataloader))):
+                    samples_processed = 0
+                    for batch_idx, batch in enumerate(tqdm(dataloader, total=min(total_batches_needed, len(dataloader)))):
+                        # Stop if we've processed enough samples
+                        if num_samples is not None and samples_processed >= samples_per_rank:
+                            break
                         batch = {k: v.to(self.device, non_blocking=True) if isinstance(v, torch.Tensor) else v 
                                 for k, v in batch.items()}
                         
@@ -784,14 +1029,21 @@ class Exp5AccuracyExperiment(BaseExperiment):
                             else:
                                 raise
                         
+                        # Get appropriate metric for dataset
+                        metric_name = get_metric_for_dataset(self.dataset_name)
                         batch_accuracy = self.compute_accuracy(
                             batch=batch,
                             predictions=outputs,
-                            metric_name="vqa_score",
+                            metric_name=metric_name,
                         )
                         
                         all_scores.extend([s["score"] for s in batch_accuracy["per_sample_scores"]])
                         all_predictions.extend(batch_accuracy["per_sample_scores"])
+                        samples_processed += len(batch_accuracy["per_sample_scores"])
+                        
+                        # Stop if we've processed enough samples
+                        if num_samples is not None and samples_processed >= samples_per_rank:
+                            break
                 
                 config_end_time = time.time()
                 config_end_time_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(config_end_time))
@@ -882,106 +1134,151 @@ class Exp5AccuracyExperiment(BaseExperiment):
         # Gather results from all ranks if distributed
         if self.is_distributed:
             # Add barrier to ensure all ranks are synchronized before gather
+            barrier_success = False
             try:
                 log.info(f"Rank {self.rank}: Waiting for all ranks to finish before gathering results...")
+                # Note: dist.barrier() doesn't support timeout parameter in all PyTorch versions
+                # If barrier fails, we'll continue with manual merge from files
                 dist.barrier()
                 log.info(f"Rank {self.rank}: All ranks synchronized, starting gather...")
+                barrier_success = True
             except Exception as e:
                 log.error(f"Rank {self.rank}: Barrier failed: {e}")
+                log.warning(f"Rank {self.rank}: Continuing without barrier synchronization...")
+                log.warning(f"Rank {self.rank}: Will attempt manual merge from saved files if gather fails...")
                 # Continue anyway - individual rank results are already saved
             
-            try:
-                if self.rank == 0:
-                    gathered_results = [None] * self.world_size
-                    dist.gather_object(results_data, gathered_results, dst=0)
-                    
-                    # Merge results from all ranks
-                    merged_results_data = []
-                    for rank_results in gathered_results:
-                        if rank_results is not None:
-                            merged_results_data.extend(rank_results)
-                    
-                    # Group by configuration and merge
-                    config_dict = {}
-                    for result in merged_results_data:
-                        config_key = (result["max_crops"], result["top_k"], result["num_active_blocks"])
-                        if config_key not in config_dict:
-                            config_dict[config_key] = {
-                                "max_crops": result["max_crops"],
-                                "top_k": result["top_k"],
-                                "num_active_blocks": result["num_active_blocks"],
-                                "num_total_blocks": result["num_total_blocks"],
-                                "active_block_indices": result.get("active_block_indices", []),
-                                "per_sample_scores": [],
-                                "all_scores": [],
-                            }
+            gather_success = False
+            merged_results_data = None
+            
+            # Only attempt gather if barrier succeeded
+            # If barrier failed, non-rank-0 processes should exit early to avoid hanging
+            if barrier_success:
+                try:
+                    if self.rank == 0:
+                        gathered_results = [None] * self.world_size
+                        dist.gather_object(results_data, gathered_results, dst=0)
                         
-                        config_dict[config_key]["per_sample_scores"].extend(result["per_sample_scores"])
-                        config_dict[config_key]["all_scores"].extend([s["score"] for s in result["per_sample_scores"]])
-                    
-                    # Compute merged statistics
-                    final_results_data = []
-                    for config_key, config_data in config_dict.items():
-                        overall_accuracy = np.mean(config_data["all_scores"]) if config_data["all_scores"] else 0.0
+                        # Merge results from all ranks
+                        merged_results_data = []
+                        for rank_results in gathered_results:
+                            if rank_results is not None:
+                                merged_results_data.extend(rank_results)
                         
-                        final_results_data.append({
-                            "max_crops": config_data["max_crops"],
-                            "top_k": config_data["top_k"],
-                            "num_active_blocks": config_data["num_active_blocks"],
-                            "num_total_blocks": config_data["num_total_blocks"],
-                            "active_block_indices": config_data["active_block_indices"],
-                            "accuracy": float(overall_accuracy),
-                            "num_samples": len(config_data["all_scores"]),
-                            "std": float(np.std(config_data["all_scores"])) if config_data["all_scores"] else 0.0,
-                            "per_sample_scores": config_data["per_sample_scores"],
-                        })
-                    
-                    results_data = final_results_data
-                    
-                    # Save merged results for each configuration (rank 0 only, after merging)
-                    for merged_result in final_results_data:
-                        merged_max_crops = merged_result["max_crops"]
-                        merged_top_k = merged_result["top_k"]
-                        merged_num_active = merged_result["num_active_blocks"]
-                        
-                        merged_config_result = {
-                            "summary": [{
-                                "max_crops": merged_max_crops,
-                                "top_k": merged_top_k,
-                                "num_active_blocks": merged_num_active,
-                                "accuracy": merged_result["accuracy"],
-                                "num_samples": merged_result["num_samples"],
-                                "std": merged_result["std"],
-                            }],
-                            "all_samples": merged_result["per_sample_scores"],
-                            "config": {
-                                "dataset_name": dataset_name,
-                                "split": split,
-                                "batch_size": batch_size,
-                                "max_new_tokens": max_new_tokens,
-                                "max_crops": merged_max_crops,
-                                "top_k": merged_top_k,
-                                "num_active_blocks": merged_num_active,
-                                "num_total_blocks": total_blocks,
-                                "active_block_indices": merged_result.get("active_block_indices", []),
-                                "world_size": self.world_size,
-                                "note": "Merged results from all ranks",
-                            }
+                        gather_success = True
+                    else:
+                        dist.gather_object(results_data, None, dst=0)
+                        log.info(f"Rank {self.rank}: Successfully sent results to rank 0")
+                        gather_success = True
+                except Exception as e:
+                    log.error(f"Rank {self.rank}: Gather operation failed: {e}")
+                    log.warning(f"Rank {self.rank}: Individual results are already saved, will attempt manual merge if rank 0...")
+                    gather_success = False
+            elif self.rank == 0:
+                # Barrier failed, but rank 0 should try manual merge
+                log.warning("Barrier failed, rank 0 will attempt manual merge from saved files...")
+                gather_success = False
+            else:
+                # Barrier failed, non-rank-0 processes should exit early
+                log.warning(f"Rank {self.rank}: Barrier failed, exiting early. Results saved individually.")
+                gather_success = False
+                # Set results_data to empty to skip final save
+                results_data = []
+            
+            # If gather failed on rank 0, try to manually merge from saved files
+            if not gather_success and self.rank == 0:
+                log.warning("Attempting to manually merge results from saved rank files...")
+                try:
+                    merged_results_data = self._manual_merge_from_files()
+                    if merged_results_data:
+                        log.info(f"Successfully merged {len(merged_results_data)} configurations from saved files")
+                        gather_success = True
+                    else:
+                        log.warning("No saved rank files found for manual merge, using rank 0 results only")
+                        merged_results_data = results_data
+                except Exception as e:
+                    log.error(f"Manual merge failed: {e}")
+                    merged_results_data = results_data
+            
+            # Process merged results if available
+            if self.rank == 0 and merged_results_data:
+                # Group by configuration and merge
+                config_dict = {}
+                for result in merged_results_data:
+                    config_key = (result["max_crops"], result["top_k"], result["num_active_blocks"])
+                    if config_key not in config_dict:
+                        config_dict[config_key] = {
+                            "max_crops": result["max_crops"],
+                            "top_k": result["top_k"],
+                            "num_active_blocks": result["num_active_blocks"],
+                            "num_total_blocks": result.get("num_total_blocks", 16),
+                            "active_block_indices": result.get("active_block_indices", []),
+                            "per_sample_scores": [],
+                            "all_scores": [],
                         }
-                        
-                        # Save merged result (overwrites individual rank files)
-                        merged_filename = f"exp5_accuracy_results_crops{merged_max_crops}_topk{merged_top_k}_blocks{merged_num_active}.json"
-                        self.save_results(merged_config_result, merged_filename)
-                        log.info(f"Saved merged result for max_crops={merged_max_crops}, top_k={merged_top_k}, "
-                                f"num_active_blocks={merged_num_active} to {merged_filename}")
-                else:
-                    dist.gather_object(results_data, None, dst=0)
-                    log.info(f"Rank {self.rank}: Successfully sent results to rank 0")
-            except Exception as e:
-                log.error(f"Rank {self.rank}: Gather operation failed: {e}")
-                log.warning(f"Rank {self.rank}: Individual results are already saved, continuing without merge...")
-                # Set results_data to empty to avoid errors in final save
-                if self.rank == 0:
+                    
+                    config_dict[config_key]["per_sample_scores"].extend(result.get("per_sample_scores", []))
+                    config_dict[config_key]["all_scores"].extend([s["score"] for s in result.get("per_sample_scores", [])])
+                
+                # Compute merged statistics
+                final_results_data = []
+                for config_key, config_data in config_dict.items():
+                    overall_accuracy = np.mean(config_data["all_scores"]) if config_data["all_scores"] else 0.0
+                    
+                    final_results_data.append({
+                        "max_crops": config_data["max_crops"],
+                        "top_k": config_data["top_k"],
+                        "num_active_blocks": config_data["num_active_blocks"],
+                        "num_total_blocks": config_data["num_total_blocks"],
+                        "active_block_indices": config_data["active_block_indices"],
+                        "accuracy": float(overall_accuracy),
+                        "num_samples": len(config_data["all_scores"]),
+                        "std": float(np.std(config_data["all_scores"])) if config_data["all_scores"] else 0.0,
+                        "per_sample_scores": config_data["per_sample_scores"],
+                    })
+                
+                results_data = final_results_data
+                
+                # Save merged results for each configuration (rank 0 only, after merging)
+                for merged_result in final_results_data:
+                    merged_max_crops = merged_result["max_crops"]
+                    merged_top_k = merged_result["top_k"]
+                    merged_num_active = merged_result["num_active_blocks"]
+                    
+                    merged_config_result = {
+                        "summary": [{
+                            "max_crops": merged_max_crops,
+                            "top_k": merged_top_k,
+                            "num_active_blocks": merged_num_active,
+                            "accuracy": merged_result["accuracy"],
+                            "num_samples": merged_result["num_samples"],
+                            "std": merged_result["std"],
+                        }],
+                        "all_samples": merged_result["per_sample_scores"],
+                        "config": {
+                            "dataset_name": dataset_name,
+                            "split": split,
+                            "batch_size": batch_size,
+                            "max_new_tokens": max_new_tokens,
+                            "max_crops": merged_max_crops,
+                            "top_k": merged_top_k,
+                            "num_active_blocks": merged_num_active,
+                            "num_total_blocks": total_blocks,
+                            "active_block_indices": merged_result.get("active_block_indices", []),
+                            "world_size": self.world_size,
+                            "note": "Merged results from all ranks",
+                        }
+                    }
+                    
+                    # Save merged result (overwrites individual rank files)
+                    merged_filename = f"exp5_accuracy_results_crops{merged_max_crops}_topk{merged_top_k}_blocks{merged_num_active}.json"
+                    self.save_results(merged_config_result, merged_filename)
+                    log.info(f"Saved merged result for max_crops={merged_max_crops}, top_k={merged_top_k}, "
+                            f"num_active_blocks={merged_num_active} to {merged_filename}")
+            else:
+                # Gather failed and we're not rank 0, or no merged data available
+                if self.rank != 0:
+                    log.warning(f"Rank {self.rank}: Individual results are already saved, continuing without merge...")
                     results_data = []
         
         # Save final results
@@ -1057,9 +1354,9 @@ def main():
     parser.add_argument("--max_crops", type=int, nargs="+", default=None,
                        help="List of max_crops values (default: [2, 4, 6, 8, 10])")
     parser.add_argument("--top_k", type=int, nargs="+", default=None,
-                       help="List of top_k values (default: [4, 8, 12, 16, 20, 24, 28, 32])")
+                       help="List of top_k values (default: [4, 8, 12])")
     parser.add_argument("--num_active_blocks", type=int, nargs="+", default=None,
-                       help="List of num_active_blocks values (default: [8, 10, 12, 14, 16])")
+                       help="List of num_active_blocks values (default: [12, 14, 16])")
     parser.add_argument("--sampling_strategy", type=str, default="balanced",
                        choices=["full", "stratified", "boundary", "balanced", "custom_sparse", "lhs"],
                        help="Sparse sampling strategy (default: balanced)")
@@ -1067,19 +1364,29 @@ def main():
                        help="Automatically adjust batch size for each configuration (default: True)")
     parser.add_argument("--no_auto_adjust_batch_size", dest="auto_adjust_batch_size", action="store_false",
                        help="Disable automatic batch size adjustment")
+    parser.add_argument("--num_samples", type=int, default=None,
+                       help="Limit number of samples to process (for testing, default: None = process all)")
     
     args = parser.parse_args()
     
     logging.basicConfig(level=logging.INFO)
     
+    # Determine split based on dataset
+    split = args.split
+    if args.dataset_name == "tally_qa":
+        # TallyQA only has train and test, use test for validation
+        split = "test"
+        log.info(f"TallyQA dataset: using 'test' split instead of 'validation'")
+    
     experiment = Exp5AccuracyExperiment(
         model_path=args.model_path,
-        output_dir=args.output_dir
+        output_dir=args.output_dir,
+        dataset_name=args.dataset_name
     )
     
     experiment.run(
         dataset_name=args.dataset_name,
-        split=args.split,
+        split=split,
         batch_size=args.batch_size,
         max_new_tokens=args.max_new_tokens,
         max_crops_list=args.max_crops,
@@ -1087,6 +1394,7 @@ def main():
         num_active_blocks_list=args.num_active_blocks,
         sampling_strategy=args.sampling_strategy,
         auto_adjust_batch_size=args.auto_adjust_batch_size,
+        num_samples=args.num_samples,
     )
 
 

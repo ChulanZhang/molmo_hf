@@ -142,7 +142,7 @@ def plot_accuracy_latency_pareto(
     output_file: str,
     latency_type: str = "total",
     latency_metric: str = "mean",
-    figsize: Tuple[int, int] = (12, 8),
+    figsize: Tuple[int, int] = (10, 7),
     dpi: int = 300,
 ):
     """
@@ -218,6 +218,19 @@ def plot_accuracy_latency_pareto(
             non_pareto_accuracies.append(accuracy)
             non_pareto_labels.append(label)
     
+    # Unified color palette (ggthemes Classic_10 - high saturation, colorblind-friendly)
+    # Official Classic_10: https://emilhvitfeldt.github.io/r-color-palettes/discrete/ggthemes/Classic_10/
+    colors = {
+        'primary': '#1F77B4',      # Deep blue (Classic_10 color 1)
+        'secondary': '#FF7F0E',    # Bright orange (Classic_10 color 2)
+        'tertiary': '#2CA02C',     # Deep green (Classic_10 color 3)
+        'quaternary': '#D62728',   # Deep red (Classic_10 color 4)
+        'quinary': '#9467BD',      # Deep purple (Classic_10 color 5)
+        'non_pareto': '#7F7F7F',   # Gray (Classic_10 color 8)
+        'pareto': '#D62728',       # Deep red for Pareto points
+        'pareto_line': '#D62728',  # Deep red for Pareto line
+    }
+    
     # Create plot
     fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
     
@@ -226,12 +239,13 @@ def plot_accuracy_latency_pareto(
         ax.scatter(
             non_pareto_latencies,
             non_pareto_accuracies,
-            c='lightgray',
+            c=colors['non_pareto'],
             s=100,
-            alpha=0.6,
+            alpha=0.5,
             label='Non-Pareto',
-            edgecolors='gray',
-            linewidths=0.5,
+            edgecolors='black',
+            linewidths=1.0,
+            zorder=1,
         )
     
     # Plot Pareto points
@@ -239,11 +253,11 @@ def plot_accuracy_latency_pareto(
         ax.scatter(
             pareto_latencies,
             pareto_accuracies,
-            c='red',
-            s=150,
-            alpha=0.8,
+            c=colors['pareto'],
+            s=200,
+            alpha=0.9,
             label='Pareto Frontier',
-            edgecolors='darkred',
+            edgecolors='black',
             linewidths=1.5,
             marker='*',
             zorder=5,
@@ -256,9 +270,10 @@ def plot_accuracy_latency_pareto(
         ax.plot(
             pareto_latencies_sorted,
             pareto_accuracies_sorted,
-            'r--',
-            linewidth=2,
-            alpha=0.7,
+            color=colors['pareto_line'],
+            linestyle='--',
+            linewidth=2.5,
+            alpha=0.8,
             label='Pareto Frontier Line',
             zorder=4,
         )
@@ -279,16 +294,18 @@ def plot_accuracy_latency_pareto(
             (latency, accuracy),
             xytext=(5, 5),
             textcoords='offset points',
-            fontsize=8,
-            bbox=dict(boxstyle='round,pad=0.3', facecolor='yellow', alpha=0.7),
+            fontsize=10,
+            bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.9, edgecolor='black', linewidth=1.0),
             zorder=6,
         )
     
-    ax.set_xlabel(f'{latency_label} (ms, {latency_metric})', fontsize=12, fontweight='bold')
-    ax.set_ylabel('Accuracy', fontsize=12, fontweight='bold')
-    ax.set_title(f'Accuracy vs {latency_label} Trade-off (Pareto Frontier)', fontsize=14, fontweight='bold')
+    # Set labels and title with consistent font sizes
+    ax.set_xlabel(f'{latency_label} (ms, {latency_metric})', fontsize=16, fontweight='bold')
+    ax.set_ylabel('Accuracy', fontsize=16, fontweight='bold')
+    ax.set_title(f'Accuracy vs {latency_label} Trade-off (Pareto Frontier)', fontsize=18, fontweight='bold')
     ax.grid(True, alpha=0.3)
-    ax.legend(loc='best', fontsize=10)
+    ax.legend(loc='best', fontsize=14)
+    ax.tick_params(labelsize=14)
     
     # Add text box explaining the three knobs
     knob_explanation = (
@@ -300,9 +317,9 @@ def plot_accuracy_latency_pareto(
     ax.text(
         0.02, 0.98, knob_explanation,
         transform=ax.transAxes,
-        fontsize=9,
+        fontsize=11,
         verticalalignment='top',
-        bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8),
+        bbox=dict(boxstyle='round', facecolor='white', alpha=0.9, edgecolor='black', linewidth=1.0),
         family='monospace'
     )
     

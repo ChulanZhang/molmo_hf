@@ -99,6 +99,25 @@ class HfDataset(Dataset):
         try:
             # Try to load all splits to trigger download
             datasets.load_dataset(cls.PATH)
+        except RuntimeError as e:
+            # If dataset uses loading scripts, try with trust_remote_code=True
+            if "Dataset scripts are no longer supported" in str(e) or "loading scripts" in str(e).lower():
+                try:
+                    datasets.load_dataset(cls.PATH, trust_remote_code=True)
+                except Exception:
+                    # Fallback: try loading common splits individually with trust_remote_code
+                    for split in ["train", "validation", "test", "val"]:
+                        try:
+                            datasets.load_dataset(cls.PATH, split=split, trust_remote_code=True)
+                        except Exception:
+                            continue
+            else:
+                # Fallback: try loading common splits individually
+                for split in ["train", "validation", "test", "val"]:
+                    try:
+                        datasets.load_dataset(cls.PATH, split=split)
+                    except Exception:
+                        continue
         except Exception:
             # Fallback: try loading common splits individually
             for split in ["train", "validation", "test", "val"]:
@@ -109,8 +128,25 @@ class HfDataset(Dataset):
 
     def __init__(self, split: str, keep_in_memory=True, **kwargs):
         self.split = split
-        self.dataset = datasets.load_dataset(
-            self.PATH, split=split, keep_in_memory=keep_in_memory, **kwargs)
+        # Try loading without trust_remote_code first
+        try:
+            self.dataset = datasets.load_dataset(
+                self.PATH, split=split, keep_in_memory=keep_in_memory, **kwargs)
+        except RuntimeError as e:
+            # If dataset uses loading scripts, try with trust_remote_code=True
+            if "Dataset scripts are no longer supported" in str(e) or "loading scripts" in str(e).lower():
+                try:
+                    self.dataset = datasets.load_dataset(
+                        self.PATH, split=split, keep_in_memory=keep_in_memory, 
+                        trust_remote_code=True, **kwargs)
+                except Exception as e2:
+                    raise RuntimeError(
+                        f"Dataset {self.PATH} uses loading scripts. Tried with trust_remote_code=True but failed: {e2}. "
+                        f"Please use an older version of datasets library (e.g., datasets<3.0.0) "
+                        f"or contact the dataset maintainers to convert to Parquet format."
+                    ) from e2
+            else:
+                raise
 
     def __len__(self):
         return len(self.dataset)

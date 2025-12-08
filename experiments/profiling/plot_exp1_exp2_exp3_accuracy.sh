@@ -18,7 +18,7 @@ echo "=========================================="
 echo ""
 
 # Run the plotting script
-python3 experiments/profiling/plot_exp1_exp2_exp3_accuracy.py \
+python3 experiments/profiling/plots/plot_exp1_exp2_exp3_accuracy.py \
     --results_dir "${RESULTS_DIR}" \
     --output_dir "${OUTPUT_DIR}"
 

@@ -35,6 +35,46 @@ from molmo.eval.vqa import vqa_score
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
 
+# Cache for logged datasets to avoid repeated log messages
+_logged_datasets = set()
+
+def get_metric_for_dataset(dataset_name: str) -> str:
+    """
+    Get the appropriate evaluation metric for a dataset.
+    
+    Args:
+        dataset_name: Name of the dataset
+        
+    Returns:
+        Metric name to use for evaluation
+    """
+    metric_map = {
+        # VQA-style datasets (use vqa_score)
+        "coco_2014_vqa": "vqa_score",
+        "coco_2014_vqa_multi": "vqa_score",
+        "text_vqa": "vqa_score",
+        "okvqa": "vqa_score",
+        
+        # Multiple choice datasets
+        "science_qa_img": "mc",
+        
+        # Document/Scene text datasets (use ansl_em)
+        "doc_qa": "ansl_em",
+        "st_qa": "ansl_em",
+        
+        # Exact match datasets
+        "tally_qa": "em",
+    }
+    
+    metric = metric_map.get(dataset_name, "vqa_score")
+    
+    # Only log once per dataset to avoid spam
+    if dataset_name not in _logged_datasets:
+        log.info(f"Using metric '{metric}' for dataset '{dataset_name}'")
+        _logged_datasets.add(dataset_name)
+    
+    return metric
+
 # ANSI Colors for debug output
 class Color:
     """ANSI escape codes for colored terminal output."""
@@ -814,37 +854,117 @@ class BaseExperiment(ABC):
             
             # Get ground truth answers
             metadata = metadatas[i] if i < len(metadatas) else {}
-            if "answers" in metadata:
-                answers = metadata["answers"]
-                if isinstance(answers, str):
-                    answers = [answers]
-            elif "answer" in metadata:
-                answer = metadata["answer"]
-                answers = [answer] if isinstance(answer, str) else answer
+            
+            # Compute score based on metric type
+            if metric_name == "mc":
+                # Multiple choice evaluation (for ScienceQA)
+                from molmo.eval.vqa import select_mc_option
+                if "answer_idx" not in metadata or "options" not in metadata:
+                    log.warning(f"Sample {i} missing answer_idx or options for MC evaluation")
+                    score = 0.0
+                    per_sample_scores.append({
+                        "sample_id": i,
+                        "score": 0.0,
+                        "pred": pred_text,
+                        "answer_idx": metadata.get("answer_idx", -1),
+                        "options": metadata.get("options", [])
+                    })
+                else:
+                    options = metadata["options"]
+                    correct_idx = metadata["answer_idx"]
+                    
+                    # For ScienceQA, predictions are typically letters (A, B, C, D)
+                    # Extract the first letter from prediction and convert to index
+                    pred_clean = pred_text.strip().upper()
+                    
+                    # Try to match letter (A, B, C, D, etc.) first
+                    predicted_idx = None
+                    
+                    # Extract single letter from prediction (handle cases like "A." or "Answer: A")
+                    import re
+                    letter_match = re.search(r'\b([A-Z])\b', pred_clean)
+                    if letter_match:
+                        letter = letter_match.group(1)
+                        letter_idx = ord(letter) - ord('A')
+                        if 0 <= letter_idx < len(options):
+                            predicted_idx = letter_idx
+                    
+                    # If letter matching failed, try content matching
+                    if predicted_idx is None:
+                        # Check if metadata has option_names (letter labels)
+                        if "option_names" in metadata:
+                            option_names = metadata["option_names"]
+                            if pred_clean in option_names:
+                                predicted_idx = option_names.index(pred_clean)
+                            else:
+                                # Fall back to select_mc_option with option names
+                                predicted_idx = select_mc_option(pred_text, option_names)
+                        else:
+                            # Fall back to select_mc_option with option content
+                            predicted_idx = select_mc_option(pred_text, options)
+                    
+                    score = 1.0 if predicted_idx == correct_idx else 0.0
+                    per_sample_scores.append({
+                        "sample_id": i,
+                        "score": float(score),
+                        "pred": pred_text,
+                        "answer_idx": int(correct_idx),
+                        "predicted_idx": int(predicted_idx),
+                        "options": options
+                    })
+                scores.append(score)
             else:
-                log.warning(f"Sample {i} has no answers in metadata")
-                scores.append(0.0)
+                # For other metrics, extract answers first
+                if "answers" in metadata:
+                    answers = metadata["answers"]
+                    if isinstance(answers, str):
+                        answers = [answers]
+                elif "answer" in metadata:
+                    answer = metadata["answer"]
+                    answers = [answer] if isinstance(answer, str) else answer
+                else:
+                    log.warning(f"Sample {i} has no answers in metadata")
+                    scores.append(0.0)
+                    per_sample_scores.append({
+                        "sample_id": i,
+                        "score": 0.0,
+                        "pred": pred_text,
+                        "answers": []
+                    })
+                    continue
+                
+                # Compute score with answers
+                if metric_name == "vqa_score":
+                    from molmo.eval.vqa import vqa_score
+                    score = vqa_score(answers, pred_text)
+                elif metric_name == "em":
+                    # Exact match evaluation (for TallyQA)
+                    if isinstance(answers, str):
+                        answers = [answers]
+                    score = 1.0 if pred_text.lower().strip() in [ans.lower().strip() for ans in answers] else 0.0
+                elif metric_name == "ansl":
+                    # Average Normalized Levenshtein Similarity (for DocVQA, ST-VQA)
+                    from molmo.eval.vqa import anls_metric
+                    if isinstance(answers, str):
+                        answers = [answers]
+                    score = max(anls_metric(ref, pred_text) for ref in answers) if answers else 0.0
+                elif metric_name == "ansl_em":
+                    # Combined ANLS and EM (for DocVQA, ST-VQA)
+                    from molmo.eval.vqa import anls_metric
+                    if isinstance(answers, str):
+                        answers = [answers]
+                    # Use ANLS as primary metric (as per standard evaluation)
+                    score = max(anls_metric(ref, pred_text) for ref in answers) if answers else 0.0
+                else:
+                    raise NotImplementedError(f"Metric {metric_name} not implemented")
+                
+                scores.append(score)
                 per_sample_scores.append({
                     "sample_id": i,
-                    "score": 0.0,
+                    "score": float(score),
                     "pred": pred_text,
-                    "answers": []
+                    "answers": answers if isinstance(answers, list) else [answers]
                 })
-                continue
-            
-            # Compute score
-            if metric_name == "vqa_score":
-                score = vqa_score(answers, pred_text)
-            else:
-                raise NotImplementedError(f"Metric {metric_name} not implemented")
-            
-            scores.append(score)
-            per_sample_scores.append({
-                "sample_id": i,
-                "score": float(score),
-                "pred": pred_text,
-                "answers": answers if isinstance(answers, list) else [answers]
-            })
         
         avg_accuracy = np.mean(scores) if scores else 0.0
         

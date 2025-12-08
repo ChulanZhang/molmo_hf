@@ -272,6 +272,25 @@ class OkVqa(Dataset):
         # For datasets 4.4.1+, use load_dataset instead of load_dataset_builder
         try:
             datasets.load_dataset(cls.PATH)
+        except RuntimeError as e:
+            # If dataset uses loading scripts, try with trust_remote_code=True
+            if "Dataset scripts are no longer supported" in str(e) or "loading scripts" in str(e).lower():
+                try:
+                    datasets.load_dataset(cls.PATH, trust_remote_code=True)
+                except Exception:
+                    # Fallback: try loading common splits with trust_remote_code
+                    for split in ["train", "validation", "test", "val"]:
+                        try:
+                            datasets.load_dataset(cls.PATH, split=split, trust_remote_code=True)
+                        except Exception:
+                            continue
+            else:
+                # Fallback: try loading common splits
+                for split in ["train", "validation", "test", "val"]:
+                    try:
+                        datasets.load_dataset(cls.PATH, split=split)
+                    except Exception:
+                        continue
         except Exception:
             # Fallback: try loading common splits
             for split in ["train", "validation", "test", "val"]:
@@ -283,7 +302,36 @@ class OkVqa(Dataset):
     def __init__(self, split: str, multi_question=False, keep_in_memory=False):
         super().__init__()
         self.multi_question = multi_question
-        dataset = datasets.load_dataset(self.PATH, split=split, keep_in_memory=keep_in_memory)
+        # For datasets 3.0.0, OK-VQA requires trust_remote_code=True
+        # Try loading with trust_remote_code=True first (for datasets 3.0.0)
+        try:
+            dataset = datasets.load_dataset(
+                self.PATH, split=split, keep_in_memory=keep_in_memory, trust_remote_code=True
+            )
+        except Exception as e:
+            # Fallback: try without trust_remote_code (for newer versions that don't need it)
+            try:
+                dataset = datasets.load_dataset(
+                    self.PATH, split=split, keep_in_memory=keep_in_memory
+                )
+            except Exception as e2:
+                error_msg = str(e2)
+                # Check if it's a network/download error
+                if "ClientPayloadError" in error_msg or "ContentLengthError" in error_msg or "SSL" in error_msg or "timeout" in error_msg.lower():
+                    raise RuntimeError(
+                        f"Network error while downloading {self.PATH}. "
+                        f"This is usually due to network instability or interrupted download. "
+                        f"Please try:\n"
+                        f"  1. Run the download script first: python scripts/download_data.py okvqa --n_procs 1\n"
+                        f"  2. Or retry the experiment later when network is stable.\n"
+                        f"  3. If the download keeps failing, you may need to manually download the dataset.\n"
+                        f"Original error: {e2}"
+                    ) from e2
+                else:
+                    raise RuntimeError(
+                        f"Failed to load dataset {self.PATH} with split {split}. "
+                        f"Error: {e2}"
+                    ) from e2
         if self.multi_question:
             grouped_by_image = defaultdict(list)
             for ex in dataset:
@@ -335,6 +383,25 @@ class TextVqa(HfDataset):
         # For datasets 4.4.1+, use load_dataset instead of load_dataset_builder
         try:
             datasets.load_dataset(cls.PATH)
+        except RuntimeError as e:
+            # If dataset uses loading scripts, try with trust_remote_code=True
+            if "Dataset scripts are no longer supported" in str(e) or "loading scripts" in str(e).lower():
+                try:
+                    datasets.load_dataset(cls.PATH, trust_remote_code=True)
+                except Exception:
+                    # Fallback: try loading common splits with trust_remote_code
+                    for split in ["train", "validation", "test", "val"]:
+                        try:
+                            datasets.load_dataset(cls.PATH, split=split, trust_remote_code=True)
+                        except Exception:
+                            continue
+            else:
+                # Fallback: try loading common splits
+                for split in ["train", "validation", "test", "val"]:
+                    try:
+                        datasets.load_dataset(cls.PATH, split=split)
+                    except Exception:
+                        continue
         except Exception:
             # Fallback: try loading common splits
             for split in ["train", "validation", "test", "val"]:
@@ -344,8 +411,43 @@ class TextVqa(HfDataset):
                     continue
 
     def __init__(self, split: str, identifier=None, keep_in_memory=False):
-        super().__init__(
-            split=split, keep_in_memory=keep_in_memory)
+        # For datasets 3.0.0, TextVQA requires trust_remote_code=True
+        # Override the base class to ensure trust_remote_code is used
+        self.split = split
+        try:
+            # Try with trust_remote_code=True first (for datasets 3.0.0)
+            self.dataset = datasets.load_dataset(
+                self.PATH, split=split, trust_remote_code=True, keep_in_memory=keep_in_memory
+            )
+        except Exception as e:
+            # Fallback: try without trust_remote_code (for newer versions)
+            try:
+                self.dataset = datasets.load_dataset(
+                    self.PATH, split=split, keep_in_memory=keep_in_memory
+                )
+            except Exception as e2:
+                error_msg = str(e2)
+                # Check if it's a network/download error
+                if "ClientPayloadError" in error_msg or "ContentLengthError" in error_msg or "SSL" in error_msg or "timeout" in error_msg.lower():
+                    raise RuntimeError(
+                        f"Network error while downloading {self.PATH}. "
+                        f"This is usually due to network instability or interrupted download. "
+                        f"Please try:\n"
+                        f"  1. Run the download script first: python scripts/download_data.py textvqa --n_procs 1\n"
+                        f"  2. Or retry the experiment later when network is stable.\n"
+                        f"  3. If the download keeps failing, you may need to manually download the dataset.\n"
+                        f"Original error: {e2}"
+                    ) from e2
+                else:
+                    raise RuntimeError(
+                        f"Failed to load dataset {self.PATH} with split {split}. "
+                        f"Error: {e2}"
+                    ) from e2
+        # Call parent __init__ but skip the dataset loading part
+        # We've already loaded the dataset above
+        # HfDataset inherits from Dataset, so we need to call Dataset.__init__ directly
+        from molmo.data.dataset import Dataset
+        Dataset.__init__(self)
 
     def get(self, item, rng):
         example = self.dataset[item]
@@ -372,8 +474,9 @@ class TallyQa(Dataset):
         from aiohttp import ClientTimeout
         
         # Set longer timeout for fsspec/aiohttp downloads (in seconds)
-        # Default is usually 60 seconds, set to 3600 (1 hour) for large files like COCO
+        # Default is usually 60 seconds, set to 10800 (3 hours) for large files like COCO
         # This affects the timeout for reading chunks from the HTTP stream
+        # Large files like train2014.zip (9.73GB) and val2014.zip (5.47GB) need very long timeouts
         
         # Store original timeout settings
         original_timeout = os.environ.get("FSSPEC_TIMEOUT")
@@ -382,25 +485,33 @@ class TallyQa(Dataset):
         
         try:
             # Set environment variable (may be used by some fsspec implementations)
-            os.environ["FSSPEC_TIMEOUT"] = "3600"
+            # Use 10800 seconds (3 hours) for very large files
+            timeout_seconds = 10800
+            os.environ["FSSPEC_TIMEOUT"] = str(timeout_seconds)
             
             # Patch HTTPFileSystem to use longer timeout
             # This increases the timeout for reading data chunks during download
-            HTTPFileSystem._default_timeout = 3600
+            HTTPFileSystem._default_timeout = timeout_seconds
             
             # Also patch client_kwargs to set aiohttp timeout
             # This is the actual timeout used by aiohttp for reading chunks
             if not hasattr(HTTPFileSystem, 'client_kwargs') or HTTPFileSystem.client_kwargs is None:
                 HTTPFileSystem.client_kwargs = {}
             HTTPFileSystem.client_kwargs = HTTPFileSystem.client_kwargs.copy()
-            HTTPFileSystem.client_kwargs['timeout'] = ClientTimeout(total=3600, connect=60)
+            # Set total timeout to 3 hours, connect timeout to 5 minutes
+            HTTPFileSystem.client_kwargs['timeout'] = ClientTimeout(total=timeout_seconds, connect=300)
             
             # Create DownloadConfig with retry mechanism
+            # Increased retries for large files that may have network issues
             download_config = datasets.DownloadConfig(
                 num_proc=n_procs,
-                max_retries=5,  # Add retry mechanism for failed downloads
+                max_retries=10,  # Increased retries for large files with network instability
             )
-            TallyQaBuilder().download_and_prepare(download_config=download_config)
+            # Try to use local COCO files if available
+            coco_source = None
+            if DATA_HOME is not None:
+                coco_source = DOWNLOADS
+            TallyQaBuilder(coco_source=coco_source).download_and_prepare(download_config=download_config)
         finally:
             # Restore original timeout settings
             if original_timeout is not None:
@@ -419,9 +530,16 @@ class TallyQa(Dataset):
             elif hasattr(HTTPFileSystem, 'client_kwargs'):
                 HTTPFileSystem.client_kwargs = {}
 
-    def __init__(self, split):
+    def __init__(self, split, coco_source=None):
+        """
+        Args:
+            split: Dataset split ("train" or "test")
+            coco_source: Optional path to directory containing local COCO 2014 zip files.
+                        If provided, will use local files instead of downloading.
+                        Expected files: train2014.zip, val2014.zip
+        """
         assert split in ["train", "test"]
-        self.dataset = TallyQaBuilder().as_dataset(split=split)
+        self.dataset = TallyQaBuilder(coco_source=coco_source).as_dataset(split=split)
         super().__init__()
 
     def __len__(self):
@@ -431,16 +549,22 @@ class TallyQa(Dataset):
         ex = self.dataset[item]
         messages = []
         questions = ex["questions"]
+        answers = []
         for ix, question in enumerate(questions["question"]):
+            answer = str(questions["answer"][ix])
+            answers.append(answer)
             messages.append(dict(
                 question=question,
-                answer=str(questions["answer"][ix]),
+                answer=answer,
                 style="tally_qa"
             ))
         return dict(
             image=ex["image"],
             message_list=messages,
-            metadata=dict( image_id=ex["image_id"])
+            metadata=dict(
+                image_id=ex["image_id"],
+                answers=answers  # Add answers to metadata for evaluation
+            )
         )
 
 
@@ -507,6 +631,25 @@ class ScienceQAImageOnly(Dataset):
         # For datasets 4.4.1+, use load_dataset instead of load_dataset_builder
         try:
             datasets.load_dataset(cls.PATH)
+        except RuntimeError as e:
+            # If dataset uses loading scripts, try with trust_remote_code=True
+            if "Dataset scripts are no longer supported" in str(e) or "loading scripts" in str(e).lower():
+                try:
+                    datasets.load_dataset(cls.PATH, trust_remote_code=True)
+                except Exception:
+                    # Fallback: try loading common splits with trust_remote_code
+                    for split in ["train", "validation", "test", "val"]:
+                        try:
+                            datasets.load_dataset(cls.PATH, split=split, trust_remote_code=True)
+                        except Exception:
+                            continue
+            else:
+                # Fallback: try loading common splits
+                for split in ["train", "validation", "test", "val"]:
+                    try:
+                        datasets.load_dataset(cls.PATH, split=split)
+                    except Exception:
+                        continue
         except Exception:
             # Fallback: try loading common splits
             for split in ["train", "validation", "test", "val"]:
@@ -517,7 +660,35 @@ class ScienceQAImageOnly(Dataset):
 
     def __init__(self, split):
         assert split in ["train", "validation", "test"]
-        self.dataset = datasets.load_dataset(self.PATH, split=split).filter(lambda ex: ex["image"] is not None)
+        # For datasets 3.0.0, we need trust_remote_code=True for TextVQA
+        # Try loading with trust_remote_code=True first (for datasets 3.0.0)
+        try:
+            self.dataset = datasets.load_dataset(
+                self.PATH, split=split, trust_remote_code=True
+            ).filter(lambda ex: ex["image"] is not None)
+        except Exception as e:
+            # Fallback: try without trust_remote_code (for newer datasets versions that don't need it)
+            try:
+                self.dataset = datasets.load_dataset(
+                    self.PATH, split=split
+                ).filter(lambda ex: ex["image"] is not None)
+            except Exception as e2:
+                error_msg = str(e2)
+                # Check if it's a network/download error
+                if "ClientPayloadError" in error_msg or "ContentLengthError" in error_msg or "SSL" in error_msg:
+                    raise RuntimeError(
+                        f"Network error while downloading {self.PATH}. "
+                        f"This is usually due to network instability. "
+                        f"Please try:\n"
+                        f"  1. Run the download script first: python scripts/download_data.py textvqa --n_procs 1\n"
+                        f"  2. Or retry the experiment later when network is stable.\n"
+                        f"Original error: {e2}"
+                    ) from e2
+                else:
+                    raise RuntimeError(
+                        f"Failed to load dataset {self.PATH} with split {split}. "
+                        f"Error: {e2}"
+                    ) from e2
         super().__init__()
 
     def __len__(self):
@@ -620,11 +791,18 @@ class SceneTextQa(DatasetBase):
 
     @classmethod
     def download(cls, n_procs=1):
+        if ST_QA_SRC is None:
+            raise ValueError(
+                "MOLMO_DATA_DIR is not set. Please set it to enable ST-VQA dataset download."
+            )
         for split in ["train", "test"]:
-            if not exists(join(join(ST_QA_SRC, f"{split}_task_3.json"))):
+            file_path = join(ST_QA_SRC, f"{split}_task_3.json")
+            if not exists(file_path):
                 raise ValueError(
-                    "SceneTextQa requires manually downloading https://rrc.cvc.uab.es/?ch=11"
-                    f" please download and unzip the data into `{ST_QA_SRC}`"
+                    f"SceneTextQa requires manually downloading from https://rrc.cvc.uab.es/?ch=11 (Task 3)\n"
+                    f"Please download and unzip the data into `{ST_QA_SRC}`\n"
+                    f"Expected file: {file_path}\n"
+                    f"Note: The validation split uses the train data, so you only need train_task_3.json and test_task_3.json"
                 )
 
     def __init__(self, split):
@@ -635,7 +813,8 @@ class SceneTextQa(DatasetBase):
         split = self.split
         if split == "validation":
             split = "train"
-        src = join(ST_QA_SRC, f"{self.split}_task_3.json")
+        # Use the modified split variable for file path, not self.split
+        src = join(ST_QA_SRC, f"{split}_task_3.json")
         logging.info(f"Loading scene text data from {src}")
         with open(src) as f:
             data = json.load(f)["data"]
