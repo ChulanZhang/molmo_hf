@@ -326,6 +326,62 @@ def crops_to_max_crops(num_crops: int) -> int:
     return num_crops
 
 
+def _generate_config_filename(config_result: Dict[str, Any], dataset_name: str, use_image_size_list: bool = False) -> str:
+    """
+    Generate a descriptive filename for a configuration result.
+    
+    Format (image_size_list mode): <task_name>_imgsize<H>x<W>_topk<k>_blocks<n>.json
+    Format (vision_tokens_list mode): <task_name>_visiontoken<T>_topk<k>_blocks<n>.json
+    
+    Args:
+        config_result: Configuration result dictionary
+        dataset_name: Dataset/task name (e.g., "coco_2014_vqa" -> "coco-2014-vqa")
+        use_image_size_list: If True, we're in image_size_list mode; if False, vision_tokens_list mode
+        
+    Returns:
+        Filename string
+    """
+    # Format dataset name: replace underscores with hyphens
+    task_name = dataset_name.replace("_", "-")
+    
+    # Determine which mode we're in and generate appropriate filename
+    if use_image_size_list:
+        # image_size_list mode: use theoretical_image_size (target_image_size is no longer stored)
+        theoretical_size = config_result.get("theoretical_image_size")
+        if theoretical_size and isinstance(theoretical_size, (list, tuple)) and len(theoretical_size) >= 2:
+            img_h, img_w = theoretical_size[0], theoretical_size[1]
+            img_size_str = f"{img_h}x{img_w}"
+            prefix = "imgsize"
+        else:
+            img_size_str = "unknown"
+            prefix = "imgsize"
+    else:
+        # vision_tokens_list mode: use target_vision_tokens (preferred) or target_crops
+        target_vision_tokens = config_result.get("target_vision_tokens")
+        if target_vision_tokens is not None:
+            img_size_str = f"{target_vision_tokens}"
+            prefix = "visiontoken"
+        else:
+            # Fallback to target_crops (renamed from num_crops)
+            target_crops = config_result.get("target_crops")
+            if target_crops is not None:
+                img_size_str = f"crops{target_crops}"
+                prefix = "visiontoken"
+            else:
+                img_size_str = "unknown"
+                prefix = "visiontoken"
+    
+    # Extract top_k
+    top_k = config_result.get("top_k", "unknown")
+    
+    # Extract num_active_blocks
+    num_blocks = config_result.get("num_active_blocks", "unknown")
+    
+    # Generate filename
+    filename = f"{task_name}_{prefix}{img_size_str}_topk{top_k}_blocks{num_blocks}.json"
+    return filename
+
+
 class CombinedProfilingExperiment(BaseExperiment):
     """
     Combined Profiling: Measure accuracy and latency for different combinations of:
@@ -747,6 +803,7 @@ class CombinedProfilingExperiment(BaseExperiment):
         use_profiler_on_all_samples: bool = False,  # If True, profile all samples; if False, only first sample
         profiler_activities: Optional[List] = None,
         enable_memory_optimization: bool = False,  # Enable memory optimizations for limited GPU memory
+        resize_to_fill: bool = True,  # Upscale small images to fill target canvas before tiling
     ):
         """
         Run combined profiling experiment.
@@ -762,7 +819,10 @@ class CombinedProfilingExperiment(BaseExperiment):
             profiler_activities: List of profiler activities (default: [ProfilerActivity.CUDA])
         """
         # Default knob ranges (based on previous exp5/exp6 settings)
-        # New primary knob: image_size_list (HxW). If provided, overrides vision_tokens_list.
+        # Primary knob: vision_tokens_list (recommended) or image_size_list (legacy).
+        # If image_size_list is provided, it overrides vision_tokens_list.
+        # Store as instance variable for use in filename generation
+        self.image_size_list = image_size_list
         if image_size_list:
             # Parse image sizes and derive corresponding vision token targets
             image_specs = []
@@ -794,14 +854,16 @@ class CombinedProfilingExperiment(BaseExperiment):
                     seen.add(key)
                     unique_specs.append(spec)
             image_specs = unique_specs
-            log.info(f"Using image_size_list (primary knob): {[(s['target_h'], s['target_w']) for s in image_specs]}")
+            log.info(f"Using image_size_list (legacy knob): {[(s['target_h'], s['target_w']) for s in image_specs]}")
+            log.info("Note: vision_tokens_list is recommended for better aspect ratio handling")
         else:
-            # Fallback to legacy vision_tokens_list knob
+            # Use vision_tokens_list (recommended knob)
             if vision_tokens_list is None:
                 # Common vision token values based on vision_tokens_knob.md
                 # Corresponds to: 2, 4, 6, 8, 10 crops (max_crops=16 as upper limit)
                 vision_tokens_list = [432, 720, 1008, 1296, 1584]  # 2, 4, 6, 8, 10 crops
-            log.info(f"Using vision_tokens_list (legacy knob): {vision_tokens_list}")
+            log.info(f"Using vision_tokens_list (recommended knob): {vision_tokens_list}")
+            log.info("Note: select_tiling will adapt to each image's aspect ratio for minimal distortion")
         if top_k_list is None:
             top_k_list = [4, 8, 12]  # Based on previous experiments
         if num_active_blocks_list is None:
@@ -815,7 +877,7 @@ class CombinedProfilingExperiment(BaseExperiment):
                 for top_k in top_k_list:
                     for num_active_blocks in num_active_blocks_list:
                         combinations.append((spec, top_k, num_active_blocks))
-            log.info(f"Using image-size knob: {len(combinations)} combinations "
+            log.info(f"Using image-size knob (legacy): {len(combinations)} combinations "
                      f"(image_sizes x top_k x num_active_blocks)")
         else:
             combinations = self._generate_sparse_combinations(
@@ -844,7 +906,7 @@ class CombinedProfilingExperiment(BaseExperiment):
         
         # Import data loading modules
         from molmo.data import get_dataset_by_name
-        from molmo.data.model_preprocessor import MultiModalPreprocessor, Preprocessor
+        from molmo.preprocessors.multimodal_preprocessor import MultiModalPreprocessor, Preprocessor
         from molmo.data.data_formatter import DataFormatter
         from molmo.data.collator import MMCollator
         from molmo.data.dataset import DeterministicDataset
@@ -928,7 +990,7 @@ class CombinedProfilingExperiment(BaseExperiment):
                 # Build dataloader (batch_size=1 for accurate per-sample measurement)
                 # Set exact_num_crops to force select_tiling to use exactly num_crops
                 # This ensures actual_vision_tokens matches target_vision_tokens
-                force_full_tokens = False  # restore default: do not count padding tokens
+                force_full_tokens = False  # keep padding tokens invalid
                 mm_preprocessor = MultiModalPreprocessor(
                     tokenizer=self.tokenizer,
                     crop_mode=self.model.config.crop_mode,
@@ -937,6 +999,7 @@ class CombinedProfilingExperiment(BaseExperiment):
                     overlap_margins=self.model.config.overlap_margins,
                     image_padding_mask=bool(self.model.config.image_padding_embed),
                     force_full_tokens=force_full_tokens,  # Count padded patches as valid to match target tokens
+                    resize_to_fill=resize_to_fill,
                 )
                 
                 formatter = DataFormatter(
@@ -1239,12 +1302,12 @@ class CombinedProfilingExperiment(BaseExperiment):
                         # Extract prediction and groundtruth from batch_accuracy
                         pred_score = batch_accuracy["per_sample_scores"][0] if batch_accuracy["per_sample_scores"] else {}
                         # Note: metadata already contains question and answers, so we don't save them separately
+                        # Store per-sample result: record target_vision_tokens and target_crops (not target_image_size)
                         sample_result = {
                             "sample_id": batch_idx,
                             "target_vision_tokens": target_vision_tokens,
-                            "target_image_size": theoretical_values.get("theoretical_image_size"),
+                            "target_crops": num_crops,  # Target number of crops (from target_vision_tokens)
                             "actual_vision_tokens": actual_vision_tokens,
-                            "num_crops": num_crops,  # Target number of crops (from target_vision_tokens or image size)
                             "top_k": top_k,
                             "num_active_blocks": num_active_blocks,
                             "input_text_tokens": num_input_text_tokens,
@@ -1375,26 +1438,37 @@ class CombinedProfilingExperiment(BaseExperiment):
                         aggregate_stats["vision_tokens_diff_min"] = float(np.min(vision_tokens_diff))
                     
                     # Get theoretical values from first sample (should be consistent across samples)
+                    # But prefer loop-level values when using image_size_list (they're more reliable)
                     first_sample = per_sample_results[0] if per_sample_results else {}
                     
+                    # Determine theoretical_image_size: use loop-level value if available (from image_size_list),
+                    # otherwise fall back to first_sample
+                    if image_size_list and theoretical_image_size is not None:
+                        # Use the loop-level theoretical_image_size (set at config start)
+                        final_theoretical_image_size = theoretical_image_size
+                    else:
+                        # Fall back to first_sample (for vision_tokens_list mode)
+                        final_theoretical_image_size = first_sample.get("theoretical_image_size", None)
+                    
                     # Store results
+                    # Record target_vision_tokens and target_crops (not target_image_size)
                     config_result = {
                         "target_vision_tokens": target_vision_tokens,
-                        "target_image_size": first_sample.get("theoretical_image_size", None),
+                        "target_crops": num_crops,  # Target number of crops (calculated from target_vision_tokens)
                         "actual_vision_tokens_mean": aggregate_stats.get("vision_tokens_mean", 0.0),
-                        "num_crops": num_crops,  # Target number of crops (calculated from target_vision_tokens)
                         "max_crops": max_crops,  # max_crops parameter passed to select_tiling (set to num_crops)
                         "top_k": top_k,
                         "num_active_blocks": num_active_blocks,
                         "num_total_blocks": total_blocks,
                         "active_block_indices": block_indices,
+                        "resize_to_fill": resize_to_fill,  # Whether small images are upscaled to fill target canvas
                         "accuracy": accuracy_mean,
                         "accuracy_std": accuracy_std,
                         "num_samples": num_processed,
-                        # Theoretical values (from target_vision_tokens, should be consistent across samples)
-                        "theoretical_num_crops": first_sample.get("theoretical_num_crops", num_crops),
-                        "theoretical_tiling": first_sample.get("theoretical_tiling", None),
-                        "theoretical_image_size": first_sample.get("theoretical_image_size", None),
+                        # Theoretical values (from target_vision_tokens or image_size, should be consistent across samples)
+                        "theoretical_num_crops": first_sample.get("theoretical_num_crops", num_crops) if not image_size_list else num_crops,
+                        "theoretical_tiling": first_sample.get("theoretical_tiling", theoretical_tiling) if not image_size_list else theoretical_tiling,
+                        "theoretical_image_size": final_theoretical_image_size,
                         "theoretical_vision_tokens": first_sample.get("theoretical_vision_tokens", target_vision_tokens),
                         # Aggregate statistics (includes actual values statistics)
                         "aggregate_stats": aggregate_stats,
@@ -1405,10 +1479,14 @@ class CombinedProfilingExperiment(BaseExperiment):
                     
                     # Save intermediate results (each rank saves its own results for fault tolerance)
                     # These will be merged later and the rank-specific files will be deleted
+                    # Generate descriptive filename with control knob info
+                    base_filename = _generate_config_filename(config_result, self.dataset_name, use_image_size_list=bool(image_size_list))
                     if self.is_distributed:
-                        output_file = Path(self.output_dir) / f"combined_profiling_results_{config_idx+1}_rank{self.rank}.json"
+                        # For rank-specific files, add rank suffix before .json
+                        base_name = base_filename.replace(".json", "")
+                        output_file = Path(self.output_dir) / f"{base_name}_rank{self.rank}.json"
                     else:
-                        output_file = Path(self.output_dir) / f"combined_profiling_results_{config_idx+1}.json"
+                        output_file = Path(self.output_dir) / base_filename
                     with open(output_file, 'w') as f:
                         json.dump(config_result, f, indent=2)
                     log.info(f"Rank {self.rank}: Saved intermediate results to {output_file}")
@@ -1576,11 +1654,13 @@ class CombinedProfilingExperiment(BaseExperiment):
                         merged_results.append(config_result)
                         
                         # Save merged result for this config (one file per config, all ranks merged)
-                        config_idx = config_idx_map.get(config_key, len(merged_results))
-                        output_file = Path(self.output_dir) / f"combined_profiling_results_{config_idx+1}.json"
+                        # Use descriptive filename with control knob info
+                        # Use instance variable to determine mode
+                        use_img_size_mode = bool(self.image_size_list) if hasattr(self, 'image_size_list') else False
+                        output_file = Path(self.output_dir) / _generate_config_filename(config_result, self.dataset_name, use_image_size_list=use_img_size_mode)
                         with open(output_file, 'w') as f:
                             json.dump(config_result, f, indent=2)
-                        log.info(f"Saved merged results for config {config_idx+1} to {output_file} (merged from {self.world_size} ranks, {len(all_per_sample)} samples)")
+                        log.info(f"Saved merged results to {output_file} (merged from {self.world_size} ranks, {len(all_per_sample)} samples)")
                     
                     results = merged_results
                     log.info(f"Merged results from {self.world_size} ranks: {len(results)} configurations, total samples: {sum(r.get('num_samples', 0) for r in results)}")
@@ -1598,15 +1678,22 @@ class CombinedProfilingExperiment(BaseExperiment):
             log.info(f"Experiment completed! Results saved:")
             
             # List all saved config files (exclude rank-specific intermediate files)
-            config_files = sorted(glob.glob(str(Path(self.output_dir) / "combined_profiling_results_*.json")))
+            # Match files with pattern: <task_name>_imgsize*_topk*_blocks*.json or <task_name>_visiontoken*_topk*_blocks*.json
+            # (works for both image_size_list mode: imgsize<H>x<W> and vision_tokens_list mode: visiontoken<T>)
+            task_name_pattern = self.dataset_name.replace("_", "-")
+            config_files = sorted(glob.glob(str(Path(self.output_dir) / f"{task_name_pattern}_imgsize*_topk*_blocks*.json")) + 
+                                  glob.glob(str(Path(self.output_dir) / f"{task_name_pattern}_visiontoken*_topk*_blocks*.json")))
             config_files = [f for f in config_files if "_rank" not in Path(f).name]
             for f in config_files:
                 log.info(f"  - {Path(f).name}")
             
             # Clean up intermediate rank-specific files (only in distributed mode)
             if self.is_distributed:
-                intermediate_pattern = str(Path(self.output_dir) / "combined_profiling_results_*_rank*.json")
+                task_name_pattern = self.dataset_name.replace("_", "-")
+                intermediate_pattern = str(Path(self.output_dir) / f"{task_name_pattern}_imgsize*_topk*_blocks*_rank*.json")
                 intermediate_files = glob.glob(intermediate_pattern)
+                # Also match visiontoken pattern
+                intermediate_files.extend(glob.glob(str(Path(self.output_dir) / f"{task_name_pattern}_visiontoken*_topk*_blocks*_rank*.json")))
                 if intermediate_files:
                     log.info(f"\nCleaning up {len(intermediate_files)} intermediate rank files...")
                     deleted_count = 0
@@ -1618,7 +1705,8 @@ class CombinedProfilingExperiment(BaseExperiment):
                             log.warning(f"Failed to delete {f}: {e}")
                     log.info(f"Deleted {deleted_count}/{len(intermediate_files)} intermediate files.")
             
-            log.info(f"Each configuration saved in separate file: combined_profiling_results_<config_idx>.json")
+            log.info(f"Each configuration saved in separate file: <task_name>_imgsize<H>x<W>_topk<k>_blocks<n>.json")
+            log.info(f"  (or <task_name>_visiontoken<T>_topk<k>_blocks<n>.json for vision_tokens_list mode)")
             log.info(f"{'='*60}")
 
 
@@ -1630,10 +1718,16 @@ def main():
     parser.add_argument("--split", type=str, default="validation", help="Dataset split")
     parser.add_argument("--max_new_tokens", type=int, default=16, help="Max new tokens")
     parser.add_argument("--vision_tokens_list", type=int, nargs="+", default=None, 
-                       help="List of target vision token values (legacy knob; overridden if image_size_list is provided)")
+                       help="List of target vision token values (recommended knob; allows adaptive tiling per image). "
+                            "Examples: 432 720 1008 1440 (corresponds to 2, 4, 6, 9 crops).")
     parser.add_argument("--image_size_list", type=str, nargs="+", default=None,
                        help="List of target image sizes (HxW, e.g., 560x336 560x784 784x784). "
-                            "Primary knob; overrides vision_tokens_list.")
+                            "Legacy knob; overrides vision_tokens_list if provided. "
+                            "Note: vision_tokens_list is recommended for better aspect ratio handling.")
+    parser.add_argument("--resize_to_fill", action="store_true",
+                       help="If set, upscale small images to fill the target canvas (rows*224+112, cols*224+112) "
+                            "before tiling. This helps small images fully use the target vision token budget. "
+                            "Default: True (enabled by default in run() method).")
     parser.add_argument("--top_k_list", type=int, nargs="+", default=None, help="List of top_k values")
     parser.add_argument("--num_active_blocks_list", type=int, nargs="+", default=None, help="List of num_active_blocks values")
     parser.add_argument("--sampling_strategy", type=str, default="balanced",
@@ -1668,6 +1762,10 @@ def main():
     )
     
     # Run experiment
+    # resize_to_fill: default is True (if --resize_to_fill is not passed, args.resize_to_fill is False,
+    # but we want default True, so we use args.resize_to_fill if passed, otherwise True)
+    resize_to_fill_value = args.resize_to_fill if args.resize_to_fill else True
+    
     experiment.run(
         dataset_name=args.dataset_name,
         split=args.split,
@@ -1680,6 +1778,7 @@ def main():
         num_runs_per_sample=args.num_runs_per_sample,
         use_profiler=args.use_profiler,
         use_profiler_on_all_samples=args.use_profiler_on_all_samples,
+        resize_to_fill=resize_to_fill_value,
     )
 
 

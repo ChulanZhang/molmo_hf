@@ -2,14 +2,13 @@
 
 This directory contains comprehensive documentation organized by content type. All documents have been unified in English and consolidated around three main control knobs.
 
-**📋 Migration Summary**: See [MIGRATION_SUMMARY.md](./MIGRATION_SUMMARY.md) for complete reorganization details.
+**📋 Migration Summary**: See [deprecated/MIGRATION_SUMMARY.md](./deprecated/MIGRATION_SUMMARY.md) for complete reorganization details (archived).
 
 ## Directory Structure
 
 ```
 docs/
 ├── README.md                          # This document (index)
-├── MIGRATION_SUMMARY.md               # Migration and reorganization summary
 ├── knobs/                              # 🎛️ Control knobs (core documentation)
 │   ├── README.md                      # Quick reference
 │   ├── vision_tokens_knob.md         # Vision tokens control
@@ -17,7 +16,8 @@ docs/
 │   └── transformer_blocks_knob.md    # Transformer blocks control
 ├── experiments/                        # Experiment guides (all English)
 │   ├── motivation_experiments.md      # Motivation experiments
-│   └── profiling_experiments.md       # Profiling experiments
+│   ├── profiling_experiments.md       # Profiling experiments
+│   └── all_9_datasets_data_requirements.md  # Data requirements for 9 datasets
 ├── mechanisms/                         # Code mechanisms (English)
 │   ├── batch_size_optimization.md     # Batch size optimization
 │   ├── how_to_use_eos_token.md       # EOS token usage
@@ -26,6 +26,7 @@ docs/
 ├── analysis/                           # Result analysis (content moved to knobs)
 ├── core_exp/                           # 🆕 Core experiments documentation
 │   ├── README.md                      # Experiments overview and quick reference
+│   ├── coco_caption_evaluation.md     # COCO Caption evaluation guide
 │   ├── e1-e6_*.md                     # Macro experiments (main results)
 │   └── m1-m6_*.md                     # Micro experiments (supporting findings)
 ├── development/                        # Development and refactoring
@@ -43,6 +44,42 @@ Complete documentation for the three main control knobs, unified in English with
   - Reverse calculation: vision tokens → crops, tilings, image size
   - Complete implementation examples and code references
   - Limits and constraints (integrated from max_crops_limits.md)
+  - Adaptive tiling selection and resize_to_fill mechanism
+
+- **vision_tokens_knob_examples.md** - Real-World Examples
+  - Real image examples from VQA v2 dataset
+  - Different resolutions and aspect ratios
+  - Step-by-step processing demonstrations
+  - Practical recommendations based on real examples
+
+- **vision_tokens_knob_qa.md** - Q&A
+  - Why some result files use "imgsize" naming
+  - Tier-based design vs fixed targets discussion
+  - Recommendations for immediate and long-term improvements
+
+- **vision_tokens_knob_tier_design_discussion.md** - Tier-Based Design Discussion
+  - Detailed analysis of tier-based approach
+  - Comparison with fixed targets
+  - Implementation considerations
+  - Open questions and recommendations
+
+- **vision_tokens_knob_tier_design_summary.md** - Tier-Based Design Summary
+  - Quick reference for tier-based design options
+  - Comparison table
+  - Immediate recommendations
+
+- **vision_tokens_knob_hybrid_tier_analysis.md** - Hybrid Tier Approach Deep Analysis
+  - Detailed analysis of hybrid tier approach
+  - Goal 1: No image distortion (aspect ratio preservation)
+  - Goal 2: Accuracy benefits from more vision tokens
+  - Integration with select_tiling
+  - Real-world examples with calculations
+
+- **vision_tokens_knob_hybrid_tier_implementation.md** - Hybrid Tier Implementation Guide
+  - Step-by-step implementation guide
+  - Code examples and integration patterns
+  - Result recording format
+  - Validation strategies
 
 - **moe_topk_knob.md** - MoE Top-K Control Knob
   - Dynamic MoE top-K adjustment methods
@@ -123,6 +160,8 @@ Documents for code refactoring, optimization, and development plans.
 ### I Want to Use Control Knobs
 👉 See `knobs/` directory (**Recommended, latest and most complete**)
 - Vision tokens control → `knobs/vision_tokens_knob.md`
+  - Real-world examples → `knobs/vision_tokens_knob_examples.md`
+  - Comparison with image_size_list → `core_exp/vision_tokens_list_vs_image_size_list.md`
 - MoE top-K control → `knobs/moe_topk_knob.md`
 - Transformer blocks control → `knobs/transformer_blocks_knob.md`
 - Quick reference → `knobs/README.md`
@@ -188,9 +227,179 @@ When adding new documents:
 4. Update this README index
 5. Update cross-references in related documents
 
+## Documentation Standards
+
+### File Naming Convention
+
+All documents use **snake_case** naming style (lowercase with underscores):
+- ✅ `vision_tokens_knob.md`
+- ✅ `vision_tokens_knob_examples.md`
+- ✅ `model_inference_flow.md`
+- ✅ `batch_size_optimization.md`
+- ✅ `all_9_datasets_data_requirements.md`
+- ❌ `VISION_TOKENS_KNOB.md` (old style, deprecated)
+- ❌ `VisionTokensKnob.md` (not compliant)
+- ❌ `ALL_9_DATASETS_DATA_REQUIREMENTS.md` (old style, deprecated)
+
+**Important**: All document filenames must be in **lowercase** with underscores (snake_case). This applies to:
+- All markdown files in `docs/`
+- All subdirectories (use lowercase)
+- All references in code and documentation
+
+### Document Structure Standards
+
+#### 1. Control Knob Documents (`knobs/`)
+
+**Main document** (e.g., `vision_tokens_knob.md`):
+- **Overview**: High-level description and key principles
+- **Core Formula**: Mathematical formulas and constants
+- **Pipeline/Workflow**: Step-by-step explanation
+- **Control Methods**: Different ways to use the knob
+- **Examples**: Brief examples (detailed examples in separate file)
+- **Limits and Constraints**: Practical limitations
+- **Code References**: Links to relevant code
+- **Related Documents**: Cross-references
+
+**Examples document** (e.g., `vision_tokens_knob_examples.md`):
+- **Example Selection Criteria**: How examples were chosen
+- **Multiple Real Examples**: Actual images from datasets
+  - Image characteristics (size, aspect ratio)
+  - Step-by-step processing with different targets
+  - Results and insights
+- **Summary**: Key insights from examples
+- **Practical Recommendations**: Best practices
+
+**Format for examples**:
+```markdown
+## Example N: [Image Type]
+
+### Image Characteristics
+- **Original size**: W×H (width×height)
+- **Aspect ratio**: X.XX
+- **Image ID**: From [dataset] [split] set
+
+### Processing with Target: [N] Vision Tokens ([M] crops)
+
+**Step 1: [Description]**
+```
+[Code or calculation]
+```
+
+**Step 2: [Description]**
+...
+```
+
+#### 2. Experiment Documents (`experiments/`, `core_exp/`)
+
+- **Overview**: Experiment goals and methods
+- **Usage**: How to run the experiment
+- **Configuration**: Parameters and options
+- **Output**: Result file formats
+- **Analysis**: How to interpret results
+
+#### 3. Mechanism Documents (`mechanisms/`)
+
+- **Overview**: What the mechanism does
+- **How It Works**: Detailed explanation
+- **Usage**: How to use it
+- **Code References**: Relevant code locations
+- **Best Practices**: Recommendations
+
+### Content Standards
+
+#### 1. Use Real Examples When Possible
+
+- **Control knobs**: Include real image examples from datasets
+- **Experiments**: Show actual command-line usage
+- **Mechanisms**: Provide code snippets from actual implementation
+
+#### 2. Include Step-by-Step Explanations
+
+For complex processes, break down into numbered steps:
+```markdown
+**Step 1: [Action]**
+[Explanation]
+
+**Step 2: [Action]**
+[Explanation]
+```
+
+#### 3. Use Tables for Structured Data
+
+For constants, mappings, comparisons:
+```markdown
+| Parameter | Value | Description |
+|-----------|-------|-------------|
+| ... | ... | ... |
+```
+
+#### 4. Include Code References
+
+Always link to actual code:
+```markdown
+- **Function**: `molmo/data/model_preprocessor.py:202-276`
+- **Class**: `experiments/core_exp/acc_lat_profiling.py:CombinedProfilingExperiment`
+```
+
+#### 5. Cross-Reference Related Documents
+
+At the end of each document:
+```markdown
+## Related Documents
+
+- `related_doc1.md`: Description
+- `related_doc2.md`: Description
+```
+
+### Example Document Template
+
+```markdown
+# [Document Title]
+
+## Overview
+
+[High-level description and key principles]
+
+## [Main Section 1]
+
+[Content]
+
+### [Subsection]
+
+[Detailed explanation]
+
+**Example**:
+```
+[Code or calculation]
+```
+
+## [Main Section 2]
+
+[Content]
+
+## Real-World Examples
+
+For detailed examples, see:
+- `examples_doc.md`: [Description]
+
+## Related Documents
+
+- `related_doc1.md`: [Description]
+- `related_doc2.md`: [Description]
+```
+
+### Updating Documentation
+
+When updating documentation:
+1. **Maintain consistency**: Follow existing structure and style
+2. **Update cross-references**: Update links in related documents
+3. **Update index**: Update this README if adding new documents
+4. **Version control**: Use clear commit messages describing changes
+5. **Review**: Ensure examples are accurate and code references are correct
+
 ### Migration
 
 For information about deprecated documents and migration paths, see:
 - `deprecated/README.md` - Migration guide for deprecated documents
-- `MIGRATION_SUMMARY.md` - Complete reorganization summary
+- `deprecated/MIGRATION_SUMMARY.md` - Complete reorganization summary (archived)
 

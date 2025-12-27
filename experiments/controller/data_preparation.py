@@ -233,7 +233,7 @@ class TrainingDataBuilder:
             'sample_ids': (N,),
         }
         """
-        from molmo.data.model_preprocessor import MultiModalPreprocessor, Preprocessor
+        from molmo.preprocessors.multimodal_preprocessor import MultiModalPreprocessor, Preprocessor
         from molmo.data.data_formatter import DataFormatter
         from molmo.data.collator import MMCollator
         from molmo.data.dataset import DeterministicDataset

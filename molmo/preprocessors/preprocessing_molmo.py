@@ -27,7 +27,7 @@ from transformers.tokenization_utils_base import TextInput, PreTokenizedInput
 from transformers.utils import logging
 
 from transformers import AutoTokenizer
-from .image_preprocessing_molmo import MolmoImagesKwargs, MolmoImageProcessor
+from .multimodal_preprocessor import MolmoImagesKwargs, MolmoImageProcessor
 
 
 logger = logging.get_logger(__name__)

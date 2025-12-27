@@ -47,7 +47,7 @@ class CropOverlapAnalysis(BaseExperiment):
         if hasattr(self, '_mm_preprocessor'):
             mm_preprocessor = self._mm_preprocessor
         else:
-            from molmo.data.model_preprocessor import MultiModalPreprocessor
+            from molmo.preprocessors.multimodal_preprocessor import MultiModalPreprocessor
             mm_preprocessor = MultiModalPreprocessor(
                 tokenizer=self.tokenizer,
                 crop_mode=self.model.config.crop_mode,
@@ -71,7 +71,7 @@ class CropOverlapAnalysis(BaseExperiment):
         crop_window_size = crop_window_patches * base_image_input_d  # 16 * 14 = 224
         
         # Select tiling (same logic as select_tiling)
-        from molmo.data.model_preprocessor import select_tiling
+        from molmo.preprocessors.multimodal_preprocessor import select_tiling
         tiling = select_tiling(
             original_h - total_margin_pixels,
             original_w - total_margin_pixels,
@@ -425,7 +425,7 @@ class CropOverlapAnalysis(BaseExperiment):
             
             # Get raw dataset (without preprocessor) to access original images
             from molmo.data import get_dataset_by_name
-            from molmo.data.model_preprocessor import MultiModalPreprocessor, load_image
+            from molmo.preprocessors.multimodal_preprocessor import MultiModalPreprocessor, load_image
             from molmo.data.data_formatter import DataFormatter
             from molmo.data.collator import MMCollator
             from molmo.data.dataset import DeterministicDataset
@@ -551,7 +551,7 @@ class CropOverlapAnalysis(BaseExperiment):
         Returns:
             Dictionary with crop control analysis
         """
-        from molmo.data.model_preprocessor import select_tiling
+        from molmo.preprocessors.multimodal_preprocessor import select_tiling
         
         original_h, original_w = image.shape[:2]
         max_crops = self.model.config.max_crops

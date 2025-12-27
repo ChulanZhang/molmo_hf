@@ -11,7 +11,7 @@ from molmo.data.collator import MMCollator
 from molmo.data.data_formatter import DataFormatter
 from molmo.data.dataset import DeterministicDataset
 from molmo.data.iterable_dataset_mixture import IterableDatasetMixture
-from molmo.data.model_preprocessor import Preprocessor, MultiModalPreprocessor
+from molmo.preprocessors.multimodal_preprocessor import Preprocessor, MultiModalPreprocessor
 from molmo.data.pixmo_datasets import PixMoPointExplanations as PixMoPointExplanationHF, \
     PixMoDocs, PixMoCount, PixMoPoints, PixMoCapQa, PixMoCap, PixMoPointExplanations, \
     PixMoAskModelAnything, PixMoPointsEval

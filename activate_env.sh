@@ -19,6 +19,8 @@ fi
 # !IMPORTANT: HF_HOME: Directory for storing Hugging Face data
 export MOLMO_DATA_DIR=/anvil/projects/x-cis250705/data/vlm/molmo
 export HF_HOME=/anvil/projects/x-cis250705/data/vlm/huggingface
+# Explicitly set HF_DATASETS_CACHE to ensure datasets library uses the correct cache directory
+export HF_DATASETS_CACHE=${HF_HOME}/datasets
 # export MOLMO_DATA_DIR=/anvil/scratch/x-pwang1/data/vlm/molmo
 # export HF_HOME=/anvil/scratch/x-pwang1/data/vlm/huggingface
 

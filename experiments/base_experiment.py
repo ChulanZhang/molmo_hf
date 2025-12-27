@@ -21,11 +21,11 @@ from transformers import AutoTokenizer, AutoProcessor, AutoConfig
 from molmo.models.modeling_molmoe import MolmoForCausalLM
 from molmo.models.config_molmoe import MolmoConfig
 from molmo.preprocessors.preprocessing_molmo import MolmoProcessor
-from molmo.preprocessors.image_preprocessing_molmo import MolmoImageProcessor
+from molmo.preprocessors.multimodal_preprocessor import MolmoImageProcessor
 
 # New Data Loading Imports
 from molmo.data import get_dataset_by_name
-from molmo.data.model_preprocessor import MultiModalPreprocessor, Preprocessor
+from molmo.preprocessors.multimodal_preprocessor import MultiModalPreprocessor, Preprocessor
 from molmo.data.data_formatter import DataFormatter
 from molmo.data.collator import MMCollator
 from molmo.data.dataset import DeterministicDataset
@@ -147,6 +147,13 @@ class BaseExperiment(ABC):
             log.warning("MOLMO_DATA_DIR is not set. Please ensure you have sourced activate_env.sh")
         if "HF_HOME" not in os.environ:
             log.warning("HF_HOME is not set. Please ensure you have sourced activate_env.sh")
+        
+        # Set umask to allow group write access (664 permissions for files, 775 for directories)
+        # This ensures files created by Hugging Face datasets (including lock files)
+        # and other Python code can be written by other users in the same group
+        # umask 0002: files will be 664 (rw-rw-r--), directories will be 775 (rwxrwxr-x)
+        os.umask(0o002)
+        log.debug("Set umask to 0002 (group write enabled)")
             
         self.model_path = model_path
         

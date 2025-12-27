@@ -423,7 +423,7 @@ class Exp3SensitivityExperiment(BaseExperiment):
         
         # Import data loading modules
         from molmo.data import get_dataset_by_name
-        from molmo.data.model_preprocessor import MultiModalPreprocessor, Preprocessor
+        from molmo.preprocessors.multimodal_preprocessor import MultiModalPreprocessor, Preprocessor
         from molmo.data.data_formatter import DataFormatter
         from molmo.data.collator import MMCollator
         from molmo.data.dataset import DeterministicDataset
@@ -763,7 +763,7 @@ class Exp3SensitivityExperiment(BaseExperiment):
         
         # Import data loading modules
         from molmo.data import get_dataset_by_name
-        from molmo.data.model_preprocessor import MultiModalPreprocessor, Preprocessor
+        from molmo.preprocessors.multimodal_preprocessor import MultiModalPreprocessor, Preprocessor
         from molmo.data.data_formatter import DataFormatter
         from molmo.data.collator import MMCollator
         from molmo.data.dataset import DeterministicDataset

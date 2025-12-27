@@ -14,19 +14,27 @@ The three control knobs allow fine-grained control over model computation:
 
 ### 1. Vision Tokens Knob
 
-**File**: `vision_tokens_knob.md`
+**Main file**: `vision_tokens_knob.md`  
+**Examples file**: `vision_tokens_knob_examples.md`
 
 Controls the number of vision tokens by managing:
 - Number of image crops
-- Tiling configuration (rows × cols)
+- Tiling configuration (rows × cols) - **adaptively selected based on image aspect ratio**
 - Image resolution
 
 **Key formula**: `Total Vision Tokens = (num_crops + 1) × 144`
+
+**Key innovation**: Uses `vision_tokens_list` instead of `image_size_list` for adaptive tiling selection, minimizing image distortion.
 
 **Use cases**:
 - Reduce prefill latency by limiting vision tokens
 - Balance quality vs. speed for different image sizes
 - Adaptive image resizing based on latency budget
+- Preserve aspect ratio while controlling vision token count
+
+**See also**:
+- `vision_tokens_knob_examples.md`: Real-world examples with actual images from VQA v2 dataset
+- `../core_exp/vision_tokens_list_vs_image_size_list.md`: Detailed comparison of two approaches
 
 ### 2. MoE Top-K Knob
 

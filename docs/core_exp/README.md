@@ -140,6 +140,7 @@ Each experiment should have:
 - **Control Knobs**: `../knobs/` - How to control each knob
 - **Batch Size Optimization**: `../mechanisms/batch_size_optimization.md`
 - **Model Inference**: `../mechanisms/model_inference_flow.md`
+- **COCO Caption Evaluation**: `coco_caption_evaluation.md` - Standard COCO Caption evaluation guide
 
 ## Quick Reference
 

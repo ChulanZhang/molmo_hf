@@ -1,9 +1,17 @@
 import json
 import logging
+import os
 import re
 from collections import defaultdict
 from os.path import exists
 from os.path import join
+
+# Ensure HF_DATASETS_CACHE is set before importing datasets
+# (This is also set in molmo.data.dataset, but we set it here too for safety)
+if "HF_HOME" in os.environ and "HF_DATASETS_CACHE" not in os.environ:
+    hf_home = os.environ["HF_HOME"]
+    hf_datasets_cache = os.path.join(hf_home, "datasets")
+    os.environ["HF_DATASETS_CACHE"] = hf_datasets_cache
 
 import datasets
 import numpy as np

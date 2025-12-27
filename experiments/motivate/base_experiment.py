@@ -21,11 +21,11 @@ from transformers import AutoTokenizer, AutoProcessor, AutoConfig
 from molmo.models.modeling_molmoe import MolmoForCausalLM
 from molmo.models.config_molmoe import MolmoConfig
 from molmo.preprocessors.preprocessing_molmo import MolmoProcessor
-from molmo.preprocessors.image_preprocessing_molmo import MolmoImageProcessor
+from molmo.preprocessors.multimodal_preprocessor import MolmoImageProcessor
 
 # New Data Loading Imports
 from molmo.data import get_dataset_by_name
-from molmo.data.model_preprocessor import MultiModalPreprocessor, Preprocessor
+from molmo.preprocessors.multimodal_preprocessor import MultiModalPreprocessor, Preprocessor
 from molmo.data.data_formatter import DataFormatter
 from molmo.data.collator import MMCollator
 from molmo.data.dataset import DeterministicDataset

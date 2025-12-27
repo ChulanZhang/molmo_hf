@@ -2,6 +2,13 @@ import os
 import warnings
 from os.path import join
 
+# Set Hugging Face datasets cache directory BEFORE importing datasets
+# This ensures the datasets library uses the correct cache directory from HF_HOME
+if "HF_HOME" in os.environ and "HF_DATASETS_CACHE" not in os.environ:
+    hf_home = os.environ["HF_HOME"]
+    hf_datasets_cache = os.path.join(hf_home, "datasets")
+    os.environ["HF_DATASETS_CACHE"] = hf_datasets_cache
+
 import datasets
 import numpy as np
 

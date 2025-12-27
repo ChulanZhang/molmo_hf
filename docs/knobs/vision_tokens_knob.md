@@ -2,9 +2,11 @@
 
 ## Overview
 
-The vision tokens knob controls the number of vision tokens processed by the model, which directly affects prefill latency. This knob works by controlling the number of image crops, which in turn determines the total vision token count.
+The vision tokens knob is the **primary control knob** for managing vision input size in Molmo. It directly controls the number of vision tokens processed by the model, which significantly affects both accuracy and latency (especially prefill latency).
 
-## Key Formula
+**Key Principle**: Instead of fixing image dimensions (which can cause aspect ratio mismatches), we specify a **target number of vision tokens** and let the system automatically adapt the tiling configuration to each image's aspect ratio.
+
+## Core Formula
 
 ```
 Total Vision Tokens = (num_crops + 1) × 144
@@ -27,77 +29,146 @@ Where:
 | `vision_tokens_per_crop` | 144 | Post-pooling tokens per crop (12×12) |
 | `global_image_tokens` | 144 | Global image tokens |
 | `overlap_margins` | (4, 4) | Overlap margins in patches |
-| `max_crops` | 12 | Maximum number of crops (default) |
+| `crop_window_size` | 224 px | Effective crop window (16×14 patches) |
+| `total_margin_pixels` | 112 px | Total margin (8×14 patches) |
 
 ## Vision Token Calculation Pipeline
 
-### Step 1: Image Resize and Tiling
+### Step 1: Target Vision Tokens → Number of Crops
 
-The original image is resized and divided into multiple crops using the `select_tiling` algorithm:
+Given a target number of vision tokens, we calculate the required number of crops:
 
 ```python
-# Calculate tiling configuration
-tiling = select_tiling(
-    original_image_h - total_margin_pixels,
-    original_image_w - total_margin_pixels,
-    crop_window_size,
-    max_crops
-)
-
-# Resize image to target size
-resized_size = [
-    tiling[0] * crop_window_size + total_margin_pixels,
-    tiling[1] * crop_window_size + total_margin_pixels
-]
+def tokens_to_crops(target_tokens: int) -> int:
+    """
+    Calculate number of crops needed for target vision tokens.
+    
+    Formula: target_tokens = (num_crops + 1) * 144
+    Solve: num_crops = (target_tokens / 144) - 1
+    """
+    num_crops = (target_tokens // 144) - 1
+    return max(1, num_crops)  # At least 1 crop
 ```
 
-**Key parameter calculations**:
-- `crop_window_size = crop_window_patches * patch_size = 16 * 14 = 224`
-- `crop_window_patches = crop_patches - (right_margin + left_margin) = 24 - 8 = 16`
-- `crop_patches = base_image_input_size[0] // patch_size = 336 // 14 = 24`
-- `total_margin_pixels = (right_margin + left_margin) * patch_size = (4 + 4) * 14 = 112`
+**Example**:
+- Target: 432 vision tokens
+- Required crops: (432 // 144) - 1 = 2 crops
+- Theoretical tokens: (2 + 1) × 144 = 432 ✓
 
-### Step 2: The `select_tiling` Algorithm
+### Step 2: Adaptive Tiling Selection (Key Innovation)
 
-The `select_tiling` function determines the tiling configuration (rows × cols) that minimizes image upscaling:
+For each image, the system automatically selects the best tiling configuration based on the image's **original aspect ratio**:
 
-**Algorithm**:
-1. **Generate candidates**: All possible tiling configurations (i×j) where i×j ≤ max_crops
-2. **Calculate scaling**: For each candidate, calculate required scaling to fit the image
-3. **Select optimal**: Choose the tiling requiring the **least upscaling** (or least downscaling if all require downscaling)
+```python
+def select_tiling(
+    original_h: int,
+    original_w: int,
+    crop_window_size: int = 224,
+    max_num_crops: int,
+    exact_num_crops: Optional[int] = None
+) -> Tuple[int, int]:
+    """
+    Select optimal tiling (rows, cols) for given number of crops.
+    
+    When exact_num_crops is specified:
+    1. Find all possible tilings that result in exactly exact_num_crops
+    2. Calculate aspect ratio for each tiling
+    3. Select the tiling closest to the original image's aspect ratio
+    """
+    if exact_num_crops is not None:
+        # Find all factorizations of exact_num_crops
+        possible_tilings = []
+        for i in range(1, exact_num_crops + 1):
+            if exact_num_crops % i == 0:
+                j = exact_num_crops // i
+                possible_tilings.append((i, j))
+        
+        # Calculate aspect ratio for original image
+        original_aspect = original_w / original_h if original_h > 0 else 1.0
+        
+        # Select tiling with closest aspect ratio
+        best_tiling = None
+        best_match = float('inf')
+        for rows, cols in possible_tilings:
+            # Tiling aspect ratio = (cols * crop_window_size) / (rows * crop_window_size)
+            tiling_aspect = cols / rows
+            aspect_diff = abs(tiling_aspect - original_aspect)
+            if aspect_diff < best_match:
+                best_match = aspect_diff
+                best_tiling = (rows, cols)
+        
+        return best_tiling
+```
 
-**Key properties**:
-- **Aspect ratio preservation**: Selects tiling closest to original image aspect ratio
-- **Minimize upscaling**: Avoids excessive image enlargement (may cause quality loss)
-- **Considers all configurations**: Includes 1×N, N×1, 2×N, N×2, etc.
+**Key Innovation**: Instead of fixing the tiling upfront, we let `select_tiling` adapt to each image's aspect ratio, minimizing distortion.
 
-**Exact crops mode** (recommended for precise control):
-- If `exact_num_crops` is specified, `select_tiling` will **force** selection of exactly that many crops
-- Among all tilings that result in exactly `exact_num_crops` crops, it selects the one closest to the image aspect ratio
-- This ensures the **number of crops** matches the target exactly
-- **Note**: Even with `exact_num_crops`, actual vision tokens may be slightly less than `(num_crops + 1) × 144` due to invalid patches (see "Why actual vision tokens may not be exactly 144 × (num_crops + 1)" section below)
-- Used in `combined_profiling.py` to ensure precise crop count control
+### Step 3: Image Resize to Target Resolution
+
+Once the tiling is selected, we calculate the target resolution:
+
+```python
+def tiling_to_resolution(tiling: Tuple[int, int]) -> Tuple[int, int]:
+    """
+    Calculate target image resolution for given tiling.
+    
+    Formula:
+    target_h = rows * crop_window_size + total_margin_pixels
+    target_w = cols * crop_window_size + total_margin_pixels
+    """
+    rows, cols = tiling
+    target_h = rows * 224 + 112
+    target_w = cols * 224 + 112
+    return target_h, target_w
+```
 
 **Example**:
-- Image size: 640×425 (width > height, landscape)
-- Effective size: 528×313 (after subtracting margins)
-- Candidate tilings: 1×1, 1×2, 2×1, 1×3, 3×1, 2×2, ...
-- For 1×2 tiling: requires 224×448, scale = min(224/313, 448/528) ≈ 0.72 (downscale)
-- For 2×1 tiling: requires 448×224, scale = min(448/313, 224/528) ≈ 0.42 (downscale)
-- **Selected: 1×2** (less downscaling: 0.72 > 0.42)
+- Tiling: (3, 2) for 6 crops
+- Target resolution: (3×224+112, 2×224+112) = (784, 560)
 
-### Step 3: Per-Crop Processing
+### Step 4: Resize with Aspect Ratio Preservation
+
+The image is resized to the target resolution while preserving aspect ratio:
+
+```python
+def resize_and_crop_to_fill(
+    image: np.ndarray,
+    target_h: int,
+    target_w: int
+) -> np.ndarray:
+    """
+    Resize image to fill target canvas, then crop/pad to exact dimensions.
+    
+    This ensures:
+    1. Small images are upscaled to fill the canvas (when resize_to_fill=True)
+    2. Aspect ratio is preserved during resize
+    3. Final dimensions match target exactly (via crop/pad)
+    """
+    # Calculate scale to fill target (preserving aspect ratio)
+    scale = max(target_h / image_h, target_w / image_w)
+    
+    # Resize
+    resized_h = int(image_h * scale)
+    resized_w = int(image_w * scale)
+    resized = cv2.resize(image, (resized_w, resized_h))
+    
+    # Crop or pad to exact target dimensions
+    # ... (crop if too large, pad if too small)
+    
+    return final_image
+```
+
+### Step 5: Per-Crop Processing
 
 Each crop is processed at fixed size `base_image_input_size = (336, 336)`:
 
 ```python
 # Patch grid per crop
-vision_grid_h = base_image_input_size[0] // image_patch_size  # 336 // 14 = 24
-vision_grid_w = base_image_input_size[1] // image_patch_size  # 336 // 14 = 24
-vision_patches_per_crop = vision_grid_h * vision_grid_w  # 24 * 24 = 576
+vision_grid_h = 336 // 14 = 24
+vision_grid_w = 336 // 14 = 24
+vision_patches_per_crop = 24 * 24 = 576
 ```
 
-### Step 4: Vision Encoder and Pooling
+### Step 6: Vision Encoder and Pooling
 
 1. **Vision Encoder (ViT)**: Processes 576 patches per crop → 576 features per crop
 2. **2D Pooling**: Reduces 24×24 patches to 12×12 tokens via 2×2 pooling
@@ -108,7 +179,7 @@ vision_patches_per_crop = vision_grid_h * vision_grid_w  # 24 * 24 = 576
    ```
 3. **Global Image**: Always processed, produces 144 tokens (same as each crop)
 
-### Step 5: Total Vision Tokens
+### Step 7: Total Vision Tokens
 
 ```python
 total_vision_tokens = (num_crops + 1) * vision_tokens_per_crop
@@ -123,222 +194,390 @@ num_vision_tokens = (batch["image_input_idx"] >= 0).sum().item()
 
 Note: `image_input_idx` already reflects post-pooling token count (144), not pre-pooling patch count (576).
 
-**Why actual vision tokens may not be exactly 144 × (num_crops + 1)**:
-- Invalid patches are marked as `-100` in `image_input_idx`
-- These patches are excluded from the count: `(image_input_idx >= 0).sum()`
-- Common causes of invalid patches:
-  1. **Image boundary handling**: Patches that extend beyond image boundaries
-  2. **Padding regions**: Patches in padding areas (especially for non-square images)
-  3. **Tiling edge cases**: Some crops may have partial patches at edges
+## Why Actual Vision Tokens May Differ from Theoretical
 
-**Practical impact**: For most images, the deviation is small (typically 0-24 tokens, or 0-5% of theoretical value). The deviation is consistent across similar images, so it doesn't significantly affect experimental comparisons.
+**Important**: Even with precise control, actual vision tokens may be **slightly less** than the theoretical value `(num_crops + 1) × 144`.
 
-## Controlling Vision Tokens
+### Causes
 
-### Method 1: Target Vision Tokens → Calculate Required Crops (Recommended)
+1. **Invalid patches**: Patches that extend beyond image boundaries are marked as `-100` in `image_input_idx`
+2. **Padding regions**: Patches in padding areas (especially for non-square images) may be invalid
+3. **Tiling edge cases**: Some crops may have partial patches at edges
 
-Given a target number of vision tokens, calculate the required number of crops and use `exact_num_crops` to force precise crop selection:
+### Practical Impact
 
+- **Typical deviation**: 0-24 tokens (0-5% of theoretical value)
+- **Consistency**: Deviation is consistent across similar images
+- **Experimental impact**: Does not significantly affect experimental comparisons
+
+**Best Practice**: Use `actual_vision_tokens` (from `image_input_idx`) for analysis rather than theoretical value.
+
+## Control Methods: Vision Tokens List vs Image Size List
+
+### Method 1: Vision Tokens List (Recommended) ✅
+
+**Principle**: Specify target vision tokens, let the system adapt tiling to each image's aspect ratio.
+
+**Workflow**:
+```
+Target Vision Tokens (e.g., 1008)
+  → Calculate num_crops (6)
+  → For each image:
+      → Select best tiling based on original aspect ratio
+      → Resize to optimal dimensions
+      → Process with exact_num_crops=6
+```
+
+**Example Configuration**:
 ```python
-def tokens_to_crops(target_tokens: int) -> int:
-    """
-    Calculate number of crops needed for target vision tokens.
-    
-    Formula: target_tokens = (num_crops + 1) * 144
-    Solve: num_crops = (target_tokens / 144) - 1
-    """
-    num_crops = (target_tokens // 144) - 1
-    return max(1, num_crops)  # At least 1 crop
+vision_tokens_list = [432, 720, 1008, 1440]
 
-# Usage in MultiModalPreprocessor
-num_crops = tokens_to_crops(target_vision_tokens)
+# Corresponds to:
+# 432 tokens  → 2 crops  (small images)
+# 720 tokens  → 4 crops  (medium images)
+# 1008 tokens → 6 crops  (large images)
+# 1440 tokens → 9 crops  (very large images)
+```
+
+**Implementation**:
+```python
+# In acc_lat_profiling.py
+target_vision_tokens = 1008
+num_crops = tokens_to_crops(target_vision_tokens)  # = 6
+
 mm_preprocessor = MultiModalPreprocessor(
     tokenizer=tokenizer,
     crop_mode="resize",
-    max_crops=num_crops,  # Set max_crops to num_crops
-    exact_num_crops=num_crops,  # Force exact number of crops
+    max_crops=num_crops,  # = 6
+    exact_num_crops=num_crops,  # Force exactly 6 crops
+    resize_to_fill=True,  # Upscale small images to fill canvas
     # ... other parameters
 )
 ```
 
+**Advantages**:
+- ✅ **Adaptive**: Each image gets the best tiling for its aspect ratio
+- ✅ **Minimal distortion**: Aspect ratio is preserved as much as possible
+- ✅ **Simple configuration**: Just specify vision token values
+- ✅ **Consistent experiments**: All configs use same vision token targets
+
+### Method 2: Image Size List (Legacy) ⚠️
+
+**Principle**: Fix target image dimensions upfront, derive vision tokens from fixed tiling.
+
+**Workflow**:
+```
+Fixed Image Size (e.g., 560×784)
+  → Infer fixed tiling (2×3 = 6 crops)
+  → Calculate vision tokens (1008)
+  → Force all images to resize to 560×784
+```
+
+**Example Configuration**:
+```python
+image_size_list = ["560x336", "560x560", "560x784", "784x784"]
+```
+
+**Problems**:
+- ❌ **Aspect ratio mismatch**: Fixed dimensions may not match original image aspect ratio
+- ❌ **Image distortion**: Images are forced to resize to fixed dimensions, causing stretching/squashing
+- ❌ **Padding overhead**: Large padding regions reduce effective vision tokens
+- ❌ **Inconsistent tiling**: `select_tiling` may choose different tiling than inferred, causing confusion
+
+**Example of Problem**:
+```
+Original image: 640×480 (aspect 0.75, tall)
+Target size: 560×784 (aspect 1.4, wide)
+  → Fixed tiling: 2×3 (6 crops)
+  → select_tiling may choose (3,2) instead (better match for tall image)
+  → Resize to 784×560 (aspect 0.71)
+  → Result: Inconsistent! Target was 560×784 but actual is 784×560
+```
+
+## Detailed Comparison: Vision Tokens List vs Image Size List
+
+### Example 1: Tall Image (640×480, aspect 0.75)
+
+#### Using `vision_tokens_list = [1008]` ✅
+
+```
+Target: 1008 tokens (6 crops)
+  → num_crops = 6
+  → exact_num_crops = 6
+  
+For image 640×480 (aspect 0.75):
+  → select_tiling finds possible 6-crop tilings:
+     - (1,6): aspect 6.0 (too wide)
+     - (2,3): aspect 1.5 (too wide)
+     - (3,2): aspect 0.67 (closest to 0.75!) ✓
+     - (6,1): aspect 0.17 (too narrow)
+  → Selects (3,2) tiling
+  → Target resolution: 784×560 (aspect 0.71)
+  → Resize: 640×480 → 784×560 (minimal distortion)
+  → Result: Consistent, minimal distortion
+```
+
+#### Using `image_size_list = ["560x784"]` ❌
+
+```
+Target: 560×784 (aspect 1.4)
+  → Inferred tiling: 2×3 (6 crops)
+  → exact_num_crops = 6
+  
+For image 640×480 (aspect 0.75):
+  → select_tiling finds possible 6-crop tilings:
+     - (3,2): aspect 0.67 (closest to 0.75!)
+  → Selects (3,2) tiling (different from inferred!)
+  → Target resolution: 784×560 (aspect 0.71)
+  → But we wanted 560×784!
+  → Result: Inconsistent! Target was 560×784 but actual is 784×560
+```
+
+### Example 2: Wide Image (1024×768, aspect 1.33)
+
+#### Using `vision_tokens_list = [1008]` ✅
+
+```
+Target: 1008 tokens (6 crops)
+  → num_crops = 6
+  
+For image 1024×768 (aspect 1.33):
+  → select_tiling selects (2,3) tiling (aspect 1.5, closest to 1.33)
+  → Target resolution: 560×784 (aspect 1.4)
+  → Resize: 1024×768 → 560×784 (minimal distortion)
+  → Result: Consistent, minimal distortion
+```
+
+#### Using `image_size_list = ["560x784"]` ⚠️
+
+```
+Target: 560×784 (aspect 1.4)
+  → Inferred tiling: 2×3 (6 crops)
+  
+For image 1024×768 (aspect 1.33):
+  → select_tiling selects (2,3) tiling (matches inferred)
+  → Target resolution: 560×784 (aspect 1.4)
+  → Resize: 1024×768 → 560×784 (acceptable)
+  → Result: Works, but aspect ratio still has slight mismatch
+```
+
+### Example 3: Square Image (512×512, aspect 1.0)
+
+#### Using `vision_tokens_list = [720]` ✅
+
+```
+Target: 720 tokens (4 crops)
+  → num_crops = 4
+  
+For image 512×512 (aspect 1.0):
+  → select_tiling selects (2,2) tiling (aspect 1.0, perfect match!)
+  → Target resolution: 560×560 (aspect 1.0)
+  → Resize: 512×512 → 560×560 (perfect match, no distortion)
+  → Result: Perfect! Square tiling for square image
+```
+
+#### Using `image_size_list = ["560x784"]` ❌
+
+```
+Target: 560×784 (aspect 1.4)
+  → Inferred tiling: 2×3 (6 crops)
+  
+For image 512×512 (aspect 1.0):
+  → select_tiling must choose 6-crop tiling:
+     - (2,3): aspect 1.5 (closest to 1.0)
+  → Target resolution: 560×784 (aspect 1.4)
+  → Resize: 512×512 → 560×784 (severe distortion!)
+  → Result: Square image forced into wide format, severe distortion
+```
+
+## Resize to Fill: Handling Small Images
+
+### Problem: Small Images Don't Use Full Token Budget
+
+When a small image (e.g., 200×150) is processed with a large vision token target (e.g., 1440 tokens = 9 crops), the image may not fill the target canvas, resulting in:
+- Large padding regions
+- Reduced effective vision tokens
+- Wasted computation
+
+### Solution: `resize_to_fill=True` (Default)
+
+When `resize_to_fill=True`, small images are **upscaled** to fill the target canvas before tiling:
+
+```python
+def resize_and_crop_to_fill(
+    image: np.ndarray,
+    target_h: int,
+    target_w: int
+) -> np.ndarray:
+    """
+    Scale image to fill target canvas, then crop/pad to exact dimensions.
+    
+    This ensures small images are upscaled to fully utilize the vision token budget.
+    """
+    # Calculate scale to FILL target (may upscale small images)
+    scale = max(target_h / image_h, target_w / image_w)
+    
+    # Resize (may upscale)
+    resized_h = int(image_h * scale)
+    resized_w = int(image_w * scale)
+    resized = cv2.resize(image, (resized_w, resized_h))
+    
+    # Crop or pad to exact target dimensions
+    # ... (crop if too large, pad if too small)
+    
+    return final_image
+```
+
 **Example**:
-- Target: 432 vision tokens
-- Required crops: (432 // 144) - 1 = 2 crops
-- Set `max_crops=2` and `exact_num_crops=2`
-- Theoretical tokens: (2 + 1) × 144 = 432 ✓
+```
+Small image: 200×150 (aspect 0.75)
+Target: 1440 tokens (9 crops) → tiling (3,3) → resolution 784×784
 
-**Important Note**: Even with `exact_num_crops`, actual vision tokens may be **slightly less** than the theoretical value because:
-- Some patches may be marked as invalid (-100) if they exceed image boundaries
-- Padding may cause some patches to be invalid
-- Tiling configuration may result in partial crops
+Without resize_to_fill:
+  → Resize: 200×150 → 784×588 (downscale to fit, then pad)
+  → Large padding regions, reduced effective tokens
 
-**Typical deviation**: For most images, actual vision tokens are within 0-5% of the theoretical value. The deviation is usually small and consistent across similar images.
-
-**Best Practice for Precise Control**:
-1. Use `exact_num_crops` to ensure exact crop count: `exact_num_crops = (target_tokens // 144) - 1`
-2. Set `max_crops` to the same value: `max_crops = exact_num_crops`
-3. Accept that actual vision tokens may be slightly less than theoretical (typically 0-24 tokens less)
-4. For experimental comparisons, use `actual_vision_tokens` (from `image_input_idx`) rather than theoretical value
-5. The deviation is consistent across similar images, so it doesn't significantly affect experimental comparisons
-
-### Method 2: Calculate Tiling Configuration
-
-Given number of crops, find appropriate tiling configuration:
-
-```python
-def crops_to_tiling(num_crops: int, aspect_ratio: float = 1.0) -> Tuple[int, int]:
-    """
-    Find tiling configuration for given number of crops.
-    
-    Args:
-        num_crops: Target number of crops
-        aspect_ratio: Image aspect ratio (width/height)
-    
-    Returns:
-        (rows, cols) tiling configuration
-    """
-    best_tiling = None
-    best_match = float('inf')
-    
-    for i in range(1, num_crops + 1):
-        if num_crops % i == 0:
-            j = num_crops // i
-            tiling = (i, j)
-            
-            # Calculate tiling aspect ratio
-            resized_h = i * 224 + 112
-            resized_w = j * 224 + 112
-            tiling_aspect = resized_w / resized_h
-            
-            # Select closest to target aspect ratio
-            if abs(tiling_aspect - aspect_ratio) < best_match:
-                best_match = abs(tiling_aspect - aspect_ratio)
-                best_tiling = tiling
-    
-    return best_tiling if best_tiling else (1, num_crops)
+With resize_to_fill=True:
+  → Scale: max(784/200, 784/150) = 5.23 (upscale!)
+  → Resize: 200×150 → 1046×784 (upscaled to fill)
+  → Crop: 1046×784 → 784×784 (crop excess)
+  → Result: Full utilization of vision token budget
 ```
 
-### Method 3: Calculate Target Image Resolution
+**Trade-off**: Upscaling small images may introduce some artifacts, but ensures full utilization of the vision token budget, which is important for accuracy.
 
-Given tiling configuration, calculate required image resolution:
+## Implementation in Experiments
 
-```python
-def tiling_to_resolution(tiling: Tuple[int, int], 
-                        crop_window_size: int = 224,
-                        total_margin_pixels: int = 112) -> Tuple[int, int]:
-    """
-    Calculate image resolution for given tiling.
-    
-    Args:
-        tiling: (rows, cols) tiling configuration
-        crop_window_size: Size of each crop window (default: 224)
-        total_margin_pixels: Total margin pixels (default: 112)
-    
-    Returns:
-        (target_h, target_w) resolution
-    """
-    rows, cols = tiling
-    target_h = rows * crop_window_size + total_margin_pixels
-    target_w = cols * crop_window_size + total_margin_pixels
-    return target_h, target_w
+### Configuration in Scripts
+
+**H100 Script** (`run_multi_datasets_h100.sh`):
+```bash
+# Primary knob: vision tokens (target)
+VISION_TOKENS_LIST="${VISION_TOKENS_LIST:-432 720 1008 1440}"
+
+# Control whether to upscale small images
+RESIZE_TO_FILL="${RESIZE_TO_FILL:-true}"
+
+# Usage
+torchrun --nproc-per-node=${NUM_GPUS} experiments/core_exp/acc_lat_profiling.py \
+    --vision_tokens_list ${VISION_TOKENS_LIST} \
+    --resize_to_fill  # If RESIZE_TO_FILL=true
 ```
 
-### Complete Workflow: Vision Tokens → Image Resolution
-
-```python
-def vision_tokens_to_image_resolution(
-    target_tokens: int,
-    original_aspect_ratio: float,
-    crop_window_size: int = 224,
-    total_margin_pixels: int = 112
-) -> Tuple[int, int]:
-    """
-    Complete workflow: target vision tokens → required image resolution.
-    
-    Args:
-        target_tokens: Target number of vision tokens
-        original_aspect_ratio: Original image aspect ratio (width/height)
-        crop_window_size: Size of each crop window
-        total_margin_pixels: Total margin pixels
-    
-    Returns:
-        (target_h, target_w) resolution to resize image
-    """
-    # Step 1: Calculate required crops
-    num_crops = tokens_to_crops(target_tokens)
-    
-    # Step 2: Find best tiling for aspect ratio
-    tiling = crops_to_tiling(num_crops, original_aspect_ratio)
-    
-    # Step 3: Calculate target resolution
-    target_h, target_w = tiling_to_resolution(tiling, crop_window_size, total_margin_pixels)
-    
-    return target_h, target_w
+**A100 Script** (`run_multi_datasets_a100.sh`):
+```bash
+# Same configuration
+VISION_TOKENS_LIST="${VISION_TOKENS_LIST:-432 720 1008 1440}"
+RESIZE_TO_FILL="${RESIZE_TO_FILL:-true}"
 ```
 
-## Resolution to Vision Tokens Mapping
+### Code Implementation
 
-### Common Mappings
-
-| Image Resolution (H×W) | Tiling | Crops | Vision Tokens |
-|------------------------|--------|-------|---------------|
-| 336×336 | 1×1 | 1 | 288 |
-| 336×560 | 1×2 | 2 | 432 |
-| 560×336 | 2×1 | 2 | 432 |
-| 336×784 | 1×3 | 3 | 576 |
-| 560×560 | 2×2 | 4 | 720 |
-| 784×784 | 3×3 | 9 | 1440 |
-| 1008×784 | 4×3 | 12 | 1872 |
-| 784×1008 | 3×4 | 12 | 1872 |
-
-### Aspect Ratio Considerations
-
-**Recommended aspect ratio range**: 0.5 to 2.0 (1:2 to 2:1)
-
-- **Square images** (aspect ratio ≈ 1.0): Use N×N tilings (e.g., 2×2, 3×3)
-- **Wide images** (aspect ratio > 1.0): Use 1×N or 2×N tilings
-- **Tall images** (aspect ratio < 1.0): Use N×1 or N×2 tilings
-
-**Avoid extreme aspect ratios** (< 0.33 or > 3.0) as they cause significant image distortion.
-
-## Implementation Example
-
+**In `acc_lat_profiling.py`**:
 ```python
-from PIL import Image
-
-def resize_for_target_vision_tokens(
-    image: Image.Image,
-    target_tokens: int,
-    preserve_aspect_ratio: bool = True
-) -> Image.Image:
-    """
-    Resize image to achieve target number of vision tokens.
+def run(
+    self,
+    vision_tokens_list: List[int] = None,
+    resize_to_fill: bool = True,
+    ...
+):
+    # Step 1: Parse vision_tokens_list
+    if vision_tokens_list is None:
+        vision_tokens_list = [432, 720, 1008, 1296, 1584]
     
-    Args:
-        image: Input PIL Image
-        target_tokens: Target number of vision tokens
-        preserve_aspect_ratio: Whether to preserve original aspect ratio
+    # Step 2: Generate combinations
+    combinations = self._generate_sparse_combinations(
+        vision_tokens_list, top_k_list, num_active_blocks_list, ...
+    )
     
-    Returns:
-        Resized image
-    """
-    orig_w, orig_h = image.size
-    orig_aspect = orig_w / orig_h
-    
-    if preserve_aspect_ratio:
-        # Calculate target resolution
-        target_h, target_w = vision_tokens_to_image_resolution(
-            target_tokens, orig_aspect
+    # Step 3: For each combination
+    for target_vision_tokens, top_k, num_active_blocks in combinations:
+        # Calculate num_crops
+        num_crops = tokens_to_crops(target_vision_tokens)
+        max_crops = num_crops
+        
+        # Step 4: Create preprocessor with exact_num_crops
+        mm_preprocessor = MultiModalPreprocessor(
+            tokenizer=self.tokenizer,
+            crop_mode=self.model.config.crop_mode,
+            max_crops=max_crops,
+            exact_num_crops=num_crops,  # Force exact number of crops
+            resize_to_fill=resize_to_fill,  # Upscale small images
+            ...
         )
-    else:
-        # Use first available resolution for target tokens
-        num_crops = tokens_to_crops(target_tokens)
-        tiling = crops_to_tiling(num_crops, 1.0)  # Use square as default
-        target_h, target_w = tiling_to_resolution(tiling)
-    
-    # Resize image
-    resized = image.resize((target_w, target_h), Image.BILINEAR)
-    return resized
+        
+        # Step 5: Process images
+        # For each image, select_tiling will:
+        #   1. Find all tilings that result in exactly num_crops
+        #   2. Select the one closest to original aspect ratio
+        #   3. Resize image to optimal dimensions
+```
+
+### Result Recording
+
+**Per-sample results**:
+```json
+{
+  "target_vision_tokens": 1008,
+  "target_crops": 6,
+  "actual_vision_tokens": 1002,  // May be slightly less
+  "theoretical_num_crops": 6,
+  "theoretical_tiling": [3, 2],  // Selected based on image aspect ratio
+  "theoretical_image_size": [784, 560],  // Calculated from tiling
+  "actual_num_crops": 6,
+  "actual_tiling": [3, 2],  // Should match theoretical
+  "actual_image_size": [784, 560],  // Should match theoretical
+  ...
+}
+```
+
+**Config-level results**:
+```json
+{
+  "target_vision_tokens": 1008,
+  "target_crops": 6,
+  "actual_vision_tokens_mean": 1001.5,  // Average across samples
+  "theoretical_num_crops": 6,
+  "theoretical_tiling": [3, 2],  // From first sample (may vary)
+  "theoretical_image_size": [784, 560],
+  "aggregate_stats": {
+    "vision_tokens_mean": 1001.5,
+    "vision_tokens_std": 12.3,
+    "vision_tokens_diff_mean": 6.5,  // Theoretical - Actual
+    ...
+  },
+  "per_sample_results": [...]
+}
+```
+
+## Common Vision Token Values
+
+### Recommended Values
+
+| Vision Tokens | Crops | Typical Use Case | Example Resolution |
+|---------------|-------|------------------|-------------------|
+| 288 | 1 | Very small images | 336×336 |
+| 432 | 2 | Small images | 336×560 or 560×336 |
+| 576 | 3 | Small-medium images | 336×784 or 784×336 |
+| 720 | 4 | Medium images | 560×560 |
+| 1008 | 6 | Large images | 560×784 or 784×560 |
+| 1296 | 8 | Very large images | 560×1008 or 1008×560 |
+| 1440 | 9 | Very large images | 784×784 |
+| 1584 | 10 | Extremely large images | 784×1008 or 1008×784 |
+| 1872 | 12 | Maximum practical | 1008×1008 |
+
+### Default Configuration
+
+**H100 experiments**:
+```bash
+VISION_TOKENS_LIST="432 720 1008 1440"
+# 2, 4, 6, 9 crops
+```
+
+**A100 experiments**:
+```bash
+VISION_TOKENS_LIST="432 720 1008 1440"
+# Same as H100, but may use smaller batch sizes
 ```
 
 ## Limits and Constraints
@@ -355,13 +594,10 @@ The model has `max_sequence_length = 4096`, which limits the maximum vision toke
 | 28 | ~4,032 | ~64 | ❌ Almost impossible |
 | 30+ | >4,096 | <0 | ❌ Exceeds limit |
 
-**Note**: Actual tokens per crop may be slightly more than 144 due to special tokens (e.g., `image_start_token`, `image_end_token`, `image_col_token`), so estimates use 144-150 tokens per crop.
-
 **Recommendation**: 
 - **Recommended**: `max_crops ≤ 20` for practical use
 - **Feasible but requires caution**: `20 < max_crops ≤ 25`
 - **Not recommended**: `max_crops > 25`
-- **Maximum theoretical**: 25-28 with very small batch sizes (1-4)
 
 ### Memory Constraints
 
@@ -381,119 +617,63 @@ Attention computation complexity is `O(sequence_length²)`:
 - `max_crops=20`: sequence_length ≈ 2,880 + text_tokens → attention complexity ≈ 8M
 - `max_crops=28`: sequence_length ≈ 4,032 + text_tokens → attention complexity ≈ 16M
 
-Larger `max_crops` leads to:
-- Slower inference speed
-- Higher memory usage
-- May trigger CUDA kernel limits (e.g., "invalid configuration argument" error)
+## Summary: Why Vision Tokens List is Better
 
-### Code-Level Constraints
+### Problems with Image Size List
 
-The `select_tiling` function has no hard-coded maximum, but:
-- Loop complexity is `O(max_num_crops²)`
-- For very large values (>100), it becomes slow
+1. **Aspect ratio mismatch**: Fixed dimensions may not match original image aspect ratio
+2. **Image distortion**: Images are forced to resize to fixed dimensions
+3. **Padding overhead**: Large padding regions reduce effective vision tokens
+4. **Inconsistent tiling**: `select_tiling` may choose different tiling than inferred
+5. **Complex configuration**: Need to manually select multiple sizes to cover different aspect ratios
 
-**Practical limits**:
-- Default experimental range: `[2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]`
-- This is experimental configuration, not a code limit
+### Benefits of Vision Tokens List
 
-### Usage Recommendations by Scenario
+1. ✅ **Adaptive tiling**: Each image gets the best tiling for its aspect ratio
+2. ✅ **Minimal distortion**: Aspect ratio is preserved as much as possible
+3. ✅ **Simple configuration**: Just specify vision token values
+4. ✅ **Consistent experiments**: All configs use same vision token targets
+5. ✅ **Better accuracy**: More vision tokens → better accuracy (when resize_to_fill=True)
 
-1. **Standard use** (e.g., VQA v2):
-   - `max_crops = 12` (default)
-   - Sufficient for most images
+### Trade-offs
 
-2. **High-resolution images**:
-   - `max_crops = 15-18`
-   - Requires reduced batch_size
-
-3. **Very high-resolution images**:
-   - `max_crops = 20-24`
-   - Requires significantly reduced batch_size (8-16)
-   - Monitor memory usage
-
-4. **Experimental/Research**:
-   - Can try `max_crops > 24`, but requires:
-     - Very small batch_size (1-4)
-     - Monitor sequence length (must not exceed 4096)
-     - Accept slower inference speed
-
-### Testing Larger max_crops
-
-To test larger `max_crops` values:
-
-```bash
-# Test max_crops=20
-python experiments/profiling/knob1_tokens/exp1_accuracy.py \
-    --max_crops_list 20 \
-    --batch_size 16 \
-    --auto_adjust_batch_size
-
-# Test max_crops=25 (requires smaller batch size)
-python experiments/profiling/knob1_tokens/exp1_accuracy.py \
-    --max_crops_list 25 \
-    --batch_size 8 \
-    --auto_adjust_batch_size
-```
-
-**Precautions**:
-1. Start with smaller batch_size (8-16)
-2. Enable `--auto_adjust_batch_size` for automatic adjustment
-3. Monitor memory usage and sequence length
-4. If encountering "invalid configuration argument" error, batch_size or max_crops is too large
-
-### Monitoring Limits
-
-**Method 1: Check sequence length**
-```python
-input_len = batch["input_ids"].shape[1]
-if input_len > 4000:
-    log.warning(f"Sequence length {input_len} is very close to max_sequence_length=4096!")
-```
-
-**Method 2: Monitor memory**
-```python
-import torch
-if torch.cuda.is_available():
-    allocated = torch.cuda.memory_allocated() / 1e9  # GB
-    reserved = torch.cuda.memory_reserved() / 1e9     # GB
-    log.info(f"GPU Memory: {allocated:.2f}GB allocated, {reserved:.2f}GB reserved")
-```
-
-**Method 3: Test incrementally**
-Gradually increase `max_crops` and observe:
-- Whether OOM occurs
-- Whether sequence length exceeds 4096
-- Inference speed changes
-
-### Summary Table
-
-| Constraint Type | Practical Limit | Notes |
-|----------------|-----------------|-------|
-| **Hard-coded limit** | ❌ None | No hard-coded maximum in code |
-| **Sequence length** | ~25-28 | Limited by `max_sequence_length=4096` |
-| **Memory** | ~20-24 | Depends on GPU memory and batch_size |
-| **Computation complexity** | ~20-24 | Attention complexity O(n²) |
-| **Recommended value** | **≤ 20** | Balance between performance and practicality |
-
-**Conclusion**: While there's no hard-coded limit, practical use recommends `max_crops ≤ 20`, maximum 25-28 (requires very small batch_size).
+1. **Upscaling small images**: `resize_to_fill=True` may introduce artifacts, but ensures full token utilization
+2. **Variable image sizes**: Different images may have different final sizes (but same vision tokens)
+3. **Theoretical vs actual**: Actual vision tokens may be slightly less than theoretical (0-5% deviation)
 
 ## Code References
 
-- **Image preprocessing**: `molmo/preprocessors/image_preprocessing_molmo.py`
-  - `select_tiling()`: Lines 103-128
-  - `image_to_patches_and_tokens()`: Lines 170-350
+- **Image preprocessing**: `molmo/data/model_preprocessor.py`
+  - `select_tiling()`: Adaptive tiling selection
+  - `resize_and_crop_to_fill()`: Image resizing with aspect ratio preservation
+  - `image_to_patches_and_tokens()`: Vision token generation
+
+- **Experiment code**: `experiments/core_exp/acc_lat_profiling.py`
+  - `tokens_to_crops()`: Vision tokens → num_crops conversion
+  - `crops_to_tiling()`: Num_crops → tiling selection
+  - `calculate_theoretical_values()`: Theoretical value calculation
 
 - **Vision encoding**: `molmo/models/modeling_molmoe.py`
-  - `encode_image()`: Lines 1594-1627
-  - `forward()` (VisionBackbone): Lines 1629-1709
+  - `encode_image()`: Vision encoder processing
+  - `forward()` (VisionBackbone): Complete vision encoding pipeline
 
-- **Configuration**: `molmo/config.py`
-  - `llm_patches_per_crop()`: Lines 898-903
-  - `image_num_patch` property: Lines 309-312
+## Real-World Examples
+
+For detailed examples with real images from VQA v2 dataset, see:
+- **`vision_tokens_knob_examples.md`**: Real image examples showing how the vision tokens control knob works with different image resolutions and aspect ratios
+  - Example 1: Small tall image (480×640) with 432 and 1008 vision tokens
+  - Example 2: Medium square image (640×640) with 720 vision tokens
+  - Example 3: Large wide image (1024×768) with 1440 and 1008 vision tokens
+  - Example 4: Very small image (200×150) with resize_to_fill
+  - Practical recommendations based on real examples
 
 ## Related Documents
 
-- `../mechanisms/model_inference_flow.md`: Complete inference pipeline
+- `vision_tokens_knob_examples.md`: Real-world examples with actual images
+- `vision_tokens_knob_qa.md`: Q&A on naming and tier-based design
+- `vision_tokens_knob_tier_design_discussion.md`: Detailed discussion on tier-based design
+- `vision_tokens_knob_tier_design_summary.md`: Quick summary of tier-based design options
+- `../core_exp/vision_tokens_list_vs_image_size_list.md`: Detailed comparison
 - `moe_topk_knob.md`: MoE top-K control knob
 - `transformer_blocks_knob.md`: Transformer blocks control knob
-
+- `../core_exp/migration_to_vision_tokens_list.md`: Migration guide

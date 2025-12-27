@@ -12,7 +12,7 @@ __version__ = "0.1.0"
 from molmo.models.modeling_molmoe import MolmoForCausalLM, MolmoModel
 from molmo.models.config_molmoe import MolmoConfig
 from molmo.preprocessors.preprocessing_molmo import MolmoProcessor
-from molmo.preprocessors.image_preprocessing_molmo import MolmoImageProcessor
+from molmo.preprocessors.multimodal_preprocessor import MolmoImageProcessor
 
 # Training and evaluation exports
 from molmo.config import (

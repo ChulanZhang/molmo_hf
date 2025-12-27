@@ -4,7 +4,7 @@ This directory contains the reorganized profiling experiments for E1, E2, and E3
 
 ## Overview
 
-- **`combined_profiling.py`**: Combined accuracy and latency profiling
+- **`acc_lat_profiling.py`**: Combined accuracy and latency profiling
   - Measures accuracy and stage-wise latency for different knob combinations
   - Uses vision tokens (target) as first knob instead of max_crops
   - Records detailed metadata needed for E1, E2, E3 analysis
@@ -12,35 +12,54 @@ This directory contains the reorganized profiling experiments for E1, E2, and E3
   - Supports multi-dataset execution
 
 **Main scripts**:
-- **`run_combined_profiling.sh`**: Single dataset execution
-- **`run_multi_datasets.sh`**: Multi-dataset execution (recommended for batch experiments)
+- **`run_multi_datasets_h100.sh`**: Multi-dataset execution for H100 GPUs (recommended)
+- **`run_multi_datasets_a100.sh`**: Multi-dataset execution for A100 GPUs (with memory optimizations)
 
 ## Key Features
 
-### 1. Vision Tokens Control
+### 1. Vision Tokens Control (Primary Knob)
 
-The experiment uses **target vision tokens** as the first knob:
+The experiment uses **target vision tokens** as the primary control knob:
 
 ```python
 # Target vision tokens → calculate num_crops
 num_crops = (target_tokens // 144) - 1
-max_crops = 16  # Fixed upper limit for compatibility with large images
+max_crops = num_crops  # Set to num_crops to ensure exact crop count
 ```
 
+**Key Innovation**: Instead of fixing image dimensions (which can cause aspect ratio mismatches), we specify a **target number of vision tokens** and let the system automatically adapt the tiling configuration to each image's aspect ratio.
+
 **Benefits**:
-- Precise control over vision token count
-- `max_crops=16` fixed as upper limit (ensures compatibility with large images)
-- `num_crops` is the actual number of crops used (recorded in results)
-- Better for E1, E2, E3 analysis (direct vision tokens control)
+- ✅ **Adaptive tiling**: Each image gets the best tiling for its aspect ratio
+- ✅ **Minimal distortion**: Aspect ratio is preserved as much as possible
+- ✅ **Simple configuration**: Just specify vision token values (e.g., `432 720 1008 1440`)
+- ✅ **Consistent experiments**: All configs use same vision token targets
+- ✅ **Better accuracy**: More vision tokens → better accuracy (when `resize_to_fill=True`)
+
+**How it works**:
+1. Specify target vision tokens (e.g., 1008)
+2. Calculate required crops: `num_crops = (1008 // 144) - 1 = 6`
+3. For each image, `select_tiling` automatically selects the best tiling based on original aspect ratio
+4. Image is resized to optimal dimensions with minimal distortion
+
+**See**: `docs/knobs/vision_tokens_knob.md` for detailed explanation and examples.
 
 ### 2. Vision Tokens Calculation
 
 The experiment calculates actual vision tokens from batch:
 
 ```python
-# Formula: Total Vision Tokens = (num_crops + 1) × 144
+# Formula: Total Vision Tokens = (num_crops + 1) × 144 (theoretical)
+# Actual counting: only valid tokens (excludes invalid patches marked as -100)
 num_vision_tokens = (batch["image_input_idx"] >= 0).sum().item()
 ```
+
+**Important**: Actual vision tokens may be **slightly less** than theoretical value `(num_crops + 1) × 144` because:
+- Some patches may be marked as invalid (-100) if they exceed image boundaries
+- Padding may cause some patches to be invalid
+- Tiling configuration may result in partial crops
+
+**Typical deviation**: 0-24 tokens (0-5% of theoretical value). The deviation is consistent across similar images, so it doesn't significantly affect experimental comparisons.
 
 Records both **target** and **actual** vision tokens for comparison.
 
@@ -79,7 +98,7 @@ USE_PROFILER=true ./run_combined_profiling.sh
 
 **Mode 2: All samples (comprehensive, slower)**
 ```bash
-python experiments/core_exp/combined_profiling.py \
+python experiments/core_exp/acc_lat_profiling.py \
     --use_profiler \
     --use_profiler_on_all_samples \
     --num_samples 200
@@ -108,40 +127,41 @@ Records:
 ### Single Dataset
 
 ```bash
-# Single-GPU
-./run_combined_profiling.sh
-
-# Multi-GPU
-torchrun --nproc-per-node=4 experiments/core_exp/combined_profiling.py \
+# Multi-GPU (recommended)
+torchrun --nproc-per-node=4 experiments/core_exp/acc_lat_profiling.py \
     --model_path checkpoints \
-    --output_dir ./results/core_exp \
+    --output_dir ./results/core_exp_h100 \
     --dataset_name coco_2014_vqa \
     --sampling_strategy balanced \
     --num_samples 1000 \
     --num_runs_per_sample 3 \
-    --vision_tokens_list 432 720 1008 1296 1584 \
-    --top_k_list 4 8 12 \
-    --num_active_blocks_list 12 13 14 15 16
+    --vision_tokens_list 432 720 1008 1440 \
+    --top_k_list 8 12 \
+    --num_active_blocks_list 14 16 \
+    --resize_to_fill
 ```
 
 ### Multi-Dataset (Recommended)
 
 ```bash
-# Run on all configured datasets
-./run_multi_datasets.sh
+# Run on all configured datasets (H100)
+bash experiments/core_exp/run_multi_datasets_h100.sh
 
 # Run on specific dataset only
-./run_multi_datasets.sh coco_2014_vqa
+bash experiments/core_exp/run_multi_datasets_h100.sh coco_2014_vqa
+
+# Run on A100 (with memory optimizations)
+bash experiments/core_exp/run_multi_datasets_a100.sh coco_2014_vqa
 ```
 
 ### With PyTorch Profiler
 
 ```bash
 # Enable profiler for detailed operator-level analysis
-USE_PROFILER=true NUM_SAMPLES=200 ./run_combined_profiling.sh
+USE_PROFILER=true NUM_SAMPLES=200 bash experiments/core_exp/run_multi_datasets_h100.sh coco_2014_vqa
 
 # Or via command line
-python experiments/core_exp/combined_profiling.py \
+python experiments/core_exp/acc_lat_profiling.py \
     --use_profiler \
     --num_samples 200 \
     --vision_tokens_list 288 432 576 720
@@ -151,7 +171,7 @@ python experiments/core_exp/combined_profiling.py \
 
 ```bash
 # Custom vision tokens, top_k, and blocks
-python experiments/core_exp/combined_profiling.py \
+python experiments/core_exp/acc_lat_profiling.py \
     --vision_tokens_list 288 432 576 \
     --top_k_list 4 8 16 32 \
     --num_active_blocks_list 8 12 16 20 24 \
@@ -163,64 +183,88 @@ python experiments/core_exp/combined_profiling.py \
 
 ### Combined Profiling
 
-- `combined_profiling_results.json`: Final aggregated results
-- `combined_profiling_results_{config_idx}.json`: Intermediate results per configuration
-- `profiler_results_config_{config_idx}.txt`: Profiler output (if `--use_profiler` enabled)
+Each configuration is saved in a separate file with descriptive naming:
+
+**Filename format** (vision_tokens_list mode):
+```
+<task_name>_imgsizetokens<T>_topk<k>_blocks<n>.json
+```
+
+**Examples**:
+- `coco-2014-vqa_imgsizetokens432_topk8_blocks14.json`
+- `coco-2014-vqa_imgsizetokens720_topk12_blocks16.json`
+- `coco-2014-vqa_imgsizetokens1008_topk8_blocks14.json`
+
+**Additional files**:
+- `profiler_results_config_{config_idx}_sample_{sample_idx}.txt`: Profiler output (if `--use_profiler` enabled)
 
 **Structure**:
 ```json
 {
-  "summary": [
+  "target_vision_tokens": 1008,
+  "target_crops": 6,
+  "actual_vision_tokens_mean": 1001.5,
+  "max_crops": 6,
+  "top_k": 12,
+  "num_active_blocks": 16,
+  "num_total_blocks": 16,
+  "active_block_indices": [0, 1, 2, ..., 15],
+  "resize_to_fill": true,
+  "accuracy": 0.85,
+  "accuracy_std": 0.02,
+  "num_samples": 1000,
+  "theoretical_num_crops": 6,
+  "theoretical_tiling": [3, 2],
+  "theoretical_image_size": [784, 560],
+  "theoretical_vision_tokens": 1008,
+  "aggregate_stats": {
+    "T_vision_encoder_mean": 45.2,
+    "T_projector_mean": 2.1,
+    "T_LLM_prefill_mean": 120.5,
+    "T_LLM_decode_mean": 15.3,
+    "T_total_mean": 183.1,
+    "T_total_p95": 195.2,
+    "T_total_p99": 210.5,
+    "vision_tokens_mean": 1001.5,
+    "vision_tokens_std": 12.3,
+    "vision_tokens_diff_mean": 6.5,
+    ...
+  },
+  "per_sample_results": [
     {
+      "sample_id": 0,
       "target_vision_tokens": 1008,
-      "actual_vision_tokens_mean": 1008.5,
-      "vision_tokens": 1008,  # Primary knob value
-      "num_crops": 6,  # Actual number of crops used
-      "max_crops": 16,  # Fixed upper limit for compatibility
+      "target_crops": 6,
+      "actual_vision_tokens": 1002,
       "top_k": 12,
       "num_active_blocks": 16,
-      "accuracy": 0.85,
-      "accuracy_std": 0.02,
-      "num_samples": 1000,
-      "aggregate_stats": {
-        "T_vision_encoder_mean": 45.2,
-        "T_projector_mean": 2.1,
-        "T_LLM_prefill_mean": 120.5,
-        "T_LLM_decode_mean": 15.3,
-        "T_total_mean": 183.1,
-        "T_total_p95": 195.2,
-        "T_total_p99": 210.5,
-        "vision_tokens_mean": 1872.5,
+      "input_text_tokens": 45,
+      "output_tokens": 8,
+      "theoretical_num_crops": 6,
+      "theoretical_tiling": [3, 2],
+      "theoretical_image_size": [784, 560],
+      "theoretical_vision_tokens": 1008,
+      "actual_num_crops": 6,
+      "actual_tiling": [3, 2],
+      "actual_image_size": [784, 560],
+      "accuracy": 0.9,
+      "pred": "a cat",
+      "metadata": {
+        "question": "What is in the image?",
+        "answers": ["cat", "kitten"],
+        "image_id": "12345",
         ...
       },
-      "per_sample_results": [
-        {
-          "sample_id": 0,
-          "target_vision_tokens": 1008,
-          "actual_vision_tokens": 1008,
-          "vision_tokens": 1008,
-          "num_crops": 6,  # Actual number of crops used
-          "top_k": 12,
-          "num_active_blocks": 16,
-          "language_prompt": "What is in the image?",
-          "accuracy": 0.9,
-          "T_vision_encoder": 45.1,
-          "T_projector": 2.0,
-          "T_LLM_prefill": 120.3,
-          "T_LLM_decode": 15.2,
-          "T_total": 182.6,
-          ...
-        }
-      ]
+      "T_vision_encoder": 45.1,
+      "T_projector": 2.0,
+      "T_vision_total": 47.1,
+      "T_LLM_prefill": 120.3,
+      "T_LLM_decode": 15.2,
+      "T_total": 182.6,
+      "T_decode_per_token": 1.9,
+      ...
     }
-  ],
-  "config": {
-    "dataset_name": "coco_2014_vqa",
-    "num_samples": 1000,
-    "use_profiler": false,
-    "vision_tokens_list": [288, 432, 576, 720, 1008, 1440, 1872],
-    ...
-  }
+  ]
 }
 ```
 
@@ -263,44 +307,60 @@ See `docs/core_exp/PROFILER_NOTES.md` for details.
 
 ### E1: Stage-Aware Latency Decomposition
 
-Uses `combined_profiling_results.json`:
-- **Stage breakdown**: `T_vision_encoder`, `T_projector`, `T_LLM_prefill`, `T_LLM_decode` (per sample)
+Uses configuration result files (e.g., `coco-2014-vqa_imgsizetokens1008_topk8_blocks14.json`):
+- **Stage breakdown**: `T_vision_encoder`, `T_projector`, `T_LLM_prefill`, `T_LLM_decode` (per sample in `per_sample_results`)
 - **Vision tokens**: `actual_vision_tokens` per sample
 - **Scaling curves**: Prefill vs input tokens, Decode vs output tokens
 - **Profiler results**: If `--use_profiler` enabled, use `profiler_results_config_*.txt` for operator-level breakdown
 
 ### E2: Knob Coupling + Pareto-Front Structure
 
-Uses `combined_profiling_results.json`:
-- **Quality**: `accuracy` from per-sample results
-- **Latency**: `T_total_p95` or `T_total_p99` from aggregate_stats
+Uses configuration result files:
+- **Quality**: `accuracy` from config-level results
+- **Latency**: `T_total_p95` or `T_total_p99` from `aggregate_stats`
 - **Vision tokens**: `target_vision_tokens` and `actual_vision_tokens_mean`
-- **Pareto frontiers**: Combine quality and latency
+- **Other knobs**: `top_k`, `num_active_blocks`
+- **Pareto frontiers**: Combine quality and latency across all configurations
 - **Coupling analysis**: Compare frontiers with fixed knobs
 
 ### E3: Latency Estimator
 
-Uses `combined_profiling_results.json`:
-- **Training data**: Stage latencies for different configurations
-- **Features**: `target_vision_tokens`, `top_k`, `num_active_blocks`
+Uses configuration result files:
+- **Training data**: Stage latencies for different configurations (from `per_sample_results`)
+- **Features**: `target_vision_tokens`, `top_k`, `num_active_blocks`, `input_text_tokens`, `output_tokens`
 - **Targets**: Stage latencies (`T_vision_encoder`, `T_projector`, `T_LLM_prefill`, `T_LLM_decode`)
-- **Per-sample data**: Use `per_sample_results` for training
+- **Per-sample data**: Use `per_sample_results` for training (rich per-sample data)
 
 ## Key Changes from Previous Experiments
 
-### 1. Vision Tokens Control
+### 1. Vision Tokens Control (Primary Knob)
 
-**Before**: Used `max_crops` (only sets upper limit, imprecise)
-**Now**: Uses `target_vision_tokens` (precise control)
+**Before**: Used `image_size_list` (fixed dimensions, aspect ratio mismatches)
+**Now**: Uses `vision_tokens_list` (adaptive tiling, minimal distortion)
 
 ```python
-# Old approach
-max_crops = 12  # May result in different vision tokens depending on image
+# Old approach (image_size_list)
+image_size_list = ["560x336", "560x784", "784x784"]
+# Problems:
+# - Fixed dimensions may not match original image aspect ratio
+# - Images are forced to resize to fixed dimensions, causing distortion
+# - select_tiling may choose different tiling than inferred
 
-# New approach
-target_vision_tokens = 1872  # Precise target
-max_crops = (target_vision_tokens // 144) - 1  # = 12
+# New approach (vision_tokens_list)
+vision_tokens_list = [432, 720, 1008, 1440]
+# Benefits:
+# - Each image gets the best tiling for its aspect ratio
+# - Minimal distortion (aspect ratio preserved)
+# - Simple configuration, consistent experiments
 ```
+
+**See**: `docs/knobs/vision_tokens_knob.md` for detailed comparison and examples.
+
+### 2. Resize to Fill
+
+**New feature**: `resize_to_fill=True` (default) ensures small images are upscaled to fill the target canvas before tiling, fully utilizing the vision token budget.
+
+**Trade-off**: Upscaling may introduce some artifacts, but ensures full token utilization, which is important for accuracy.
 
 ### 2. Combined Measurement
 

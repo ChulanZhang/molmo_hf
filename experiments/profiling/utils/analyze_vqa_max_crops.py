@@ -19,7 +19,7 @@ if "TOKENIZERS_PARALLELISM" not in os.environ:
 sys.path.append(os.getcwd())
 
 from molmo.data import get_dataset_by_name
-from molmo.data.model_preprocessor import MultiModalPreprocessor, Preprocessor
+from molmo.preprocessors.multimodal_preprocessor import MultiModalPreprocessor, Preprocessor
 from molmo.data.data_formatter import DataFormatter
 from tqdm import tqdm
 
@@ -72,7 +72,7 @@ def analyze_max_crops_usage(
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
     
     # Create preprocessor
-    from molmo.data.model_preprocessor import MultiModalPreprocessor, Preprocessor
+    from molmo.preprocessors.multimodal_preprocessor import MultiModalPreprocessor, Preprocessor
     from molmo.data.data_formatter import DataFormatter
     
     mm_preprocessor = MultiModalPreprocessor(
@@ -278,7 +278,7 @@ def _init_worker(max_crops):
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
     
     from transformers import AutoTokenizer
-    from molmo.data.model_preprocessor import MultiModalPreprocessor, Preprocessor
+    from molmo.preprocessors.multimodal_preprocessor import MultiModalPreprocessor, Preprocessor
     from molmo.data.data_formatter import DataFormatter
     
     # Load tokenizer

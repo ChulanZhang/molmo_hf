@@ -31,7 +31,7 @@ class TestDataModules:
     
     def test_preprocessor_import(self):
         """Import preprocessors."""
-        from molmo.data.model_preprocessor import MultiModalPreprocessor, Preprocessor
+        from molmo.preprocessors.multimodal_preprocessor import MultiModalPreprocessor, Preprocessor
         assert MultiModalPreprocessor is not None
         assert Preprocessor is not None
     

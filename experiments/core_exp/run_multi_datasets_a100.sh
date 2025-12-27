@@ -5,6 +5,9 @@
 
 set -e
 
+# this is specifically for jay, probably will need to polish or handle properly later
+umask 0002
+
 # Note: This script should be run from the project root directory
 # If you run it from elsewhere, make sure to adjust paths accordingly
 
@@ -14,7 +17,7 @@ export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:T
 
 # Default values
 MODEL_PATH="${MODEL_PATH:-checkpoints}"
-BASE_OUTPUT_DIR="${BASE_OUTPUT_DIR:-./results/core_exp_a100}"
+BASE_OUTPUT_DIR="${BASE_OUTPUT_DIR:-./results/core_exp_a100/jay}"
 MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-16}"  # Default for short-answer datasets
 NUM_SAMPLES="${NUM_SAMPLES:-12}"  # Default: 1000 samples
 SAMPLING_STRATEGY="${SAMPLING_STRATEGY:-balanced}"
@@ -37,14 +40,21 @@ else
 fi
 NUM_GPUS="${NUM_GPUS_OVERRIDE:-${NUM_GPUS}}"
 
-# Primary knob: image sizes (HxW). Each size maps to tiling → num_crops → vision tokens.
-# Suggested sizes (resize target):
-#   560x336  -> tiling 1x2  -> ~384 actual tokens
-#   560x784  -> tiling 2x3  -> ~744 actual tokens
-#   784x784  -> tiling 3x3  -> ~1044 actual tokens
-IMAGE_SIZE_LIST="${IMAGE_SIZE_LIST:-560x336 560x784 784x784}"
+# Primary knob: vision tokens (target). select_tiling will automatically choose the best tiling
+# based on each image's aspect ratio, ensuring minimal distortion.
+# Vision tokens → num_crops → adaptive tiling selection per image
+# Recommended values:
+#   432 tokens  -> 2 crops  (small images)
+#   720 tokens  -> 4 crops  (medium images)
+#   1008 tokens -> 6 crops  (large images)
+#   1440 tokens -> 9 crops  (very large images)
+# Note: Using vision_tokens_list allows select_tiling to adapt to each image's aspect ratio,
+#       avoiding the aspect ratio mismatch issues with fixed image_size_list.
+VISION_TOKENS_LIST="${VISION_TOKENS_LIST:-432 720 1008 1440}"
 TOP_K_LIST="${TOP_K_LIST:-4 8 12}"
 NUM_ACTIVE_BLOCKS_LIST="${NUM_ACTIVE_BLOCKS_LIST:-12 14 16}"
+# Control whether to upscale small images to fill target canvas before tiling
+RESIZE_TO_FILL="${RESIZE_TO_FILL:-true}"
 
 # Dataset configurations
 # Format: "dataset_name:split:max_new_tokens"
@@ -84,7 +94,7 @@ run_combined_profiling() {
     echo "Num samples: ${NUM_SAMPLES} (total across all ranks)"
     echo "Max new tokens: ${max_new_tokens} (upper limit, EOS token will stop early)"
     echo "Number of GPUs: ${NUM_GPUS}"
-    echo "Image sizes: ${IMAGE_SIZE_LIST}"
+    echo "Vision tokens: ${VISION_TOKENS_LIST}"
     echo "Top K: ${TOP_K_LIST}"
     echo "Active blocks: ${NUM_ACTIVE_BLOCKS_LIST}"
     echo ""
@@ -98,22 +108,31 @@ run_combined_profiling() {
     local log_file="${log_dir}/combined_profiling_${dataset_name}_$(date +%Y%m%d_%H%M%S).log"
     echo "Saving terminal log to: ${log_file}"
     
+    # Build resize_to_fill flag based on RESIZE_TO_FILL variable
+    RESIZE_FLAG=""
+    if [ "${RESIZE_TO_FILL}" = "true" ]; then
+        RESIZE_FLAG="--resize_to_fill"
+    fi
+    
     # Run with memory optimizations
     # PYTORCH_CUDA_ALLOC_CONF is already set at the top of the script
-    torchrun --nproc-per-node=${NUM_GPUS} experiments/core_exp/combined_profiling.py \
+    # Use relative path that works regardless of where script is run from
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    torchrun --nproc-per-node=${NUM_GPUS} "${SCRIPT_DIR}/acc_lat_profiling.py" \
         --model_path "${MODEL_PATH}" \
         --output_dir "${output_dir}" \
         --dataset_name "${dataset_name}" \
         --split "${split}" \
         --max_new_tokens "${max_new_tokens}" \
-        --image_size_list ${IMAGE_SIZE_LIST} \
+        --vision_tokens_list ${VISION_TOKENS_LIST} \
         --top_k_list ${TOP_K_LIST} \
         --num_active_blocks_list ${NUM_ACTIVE_BLOCKS_LIST} \
         --sampling_strategy "${SAMPLING_STRATEGY}" \
         --num_samples "${NUM_SAMPLES}" \
         --num_runs_per_sample "${NUM_RUNS_PER_SAMPLE}" \
-        --enable_memory_optimization 2>&1 | tee "${log_file}"
-    
+        --enable_memory_optimization \
+        ${RESIZE_FLAG} 2>&1 | tee "${log_file}"
+        
     echo ""
     echo "Combined profiling completed for ${dataset_name}"
     echo "Results saved to: ${output_dir}/${dataset_name//_/-}"
@@ -133,12 +152,13 @@ echo "Sampling strategy: ${SAMPLING_STRATEGY}"
 echo "Number of GPUs: ${NUM_GPUS} (auto-detected, override with NUM_GPUS_OVERRIDE)"
 echo ""
 echo "Knob ranges:"
-echo "  Image sizes: ${IMAGE_SIZE_LIST}"
+echo "  Vision tokens: ${VISION_TOKENS_LIST}"
 echo "  Top K: ${TOP_K_LIST}"
 echo "  Active blocks: ${NUM_ACTIVE_BLOCKS_LIST}"
+echo "  Resize to fill: ${RESIZE_TO_FILL}"
 echo ""
-echo "Note: max_crops is fixed to 16 as upper limit for compatibility with large images"
-echo "      Results will be saved in dataset-specific subdirectories"
+echo "Note: Using vision_tokens_list allows select_tiling to adapt to each image's aspect ratio"
+echo "      for minimal distortion. Results will be saved in dataset-specific subdirectories"
 echo "=========================================="
 echo ""
 

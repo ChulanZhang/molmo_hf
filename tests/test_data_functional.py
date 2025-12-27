@@ -43,7 +43,7 @@ class TestDataFunctional:
     
     def test_preprocessor_creation(self):
         """Create preprocessors."""
-        from molmo.data.model_preprocessor import MultiModalPreprocessor, Preprocessor
+        from molmo.preprocessors.multimodal_preprocessor import MultiModalPreprocessor, Preprocessor
         
         # Ensure classes are importable
         assert MultiModalPreprocessor is not None

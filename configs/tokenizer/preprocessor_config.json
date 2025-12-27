@@ -1,6 +1,6 @@
 {
   "auto_map": {
-    "AutoImageProcessor": "image_preprocessing_molmo.MolmoImageProcessor",
+    "AutoImageProcessor": "multimodal_preprocessor.MolmoImageProcessor",
     "AutoProcessor": "preprocessing_molmo.MolmoProcessor"
   },
   "base_image_input_size": [
