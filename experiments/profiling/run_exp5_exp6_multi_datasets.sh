@@ -9,19 +9,22 @@ MODEL_PATH="${MODEL_PATH:-checkpoints}"
 BASE_OUTPUT_DIR="${BASE_OUTPUT_DIR:-./results/profiling}"
 BATCH_SIZE="${BATCH_SIZE:-64}"
 MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-16}"
-NUM_SAMPLES="${NUM_SAMPLES:-1000}"  # Default: 1000 samples for exp6
+NUM_SAMPLES="${NUM_SAMPLES:-10000}"  # Default: 1000 samples for exp6
 SAMPLING_STRATEGY="${SAMPLING_STRATEGY:-balanced}"
 
 # Dataset configurations
 # Format: "dataset_name:split:experiment"
 # experiment can be "exp5", "exp6", or "both"
 DATASETS=(
-    # "text_vqa:validation:exp6"
-    # "okvqa:validation:both"
+    "coco_2014_vqa:validation:exp6"
+    "text_vqa:validation:both"
+    "okvqa:validation:both"
     "science_qa_img:validation:both"
     "st_qa:validation:both"
     "doc_qa:validation:both"
     "tally_qa:test:both"  # TallyQA uses test set instead of validation
+    "mmmu:validation:both"
+    "coco_caption:validation:both"
 )
 
 # Function to run exp5
@@ -41,6 +44,12 @@ run_exp5() {
     echo "Batch size: ${BATCH_SIZE} (with auto-adjustment)"
     echo ""
     
+    # Ensure log directory exists
+    local log_dir="${BASE_OUTPUT_DIR}/logs"
+    mkdir -p "${log_dir}"
+    local log_file="${log_dir}/exp5_${dataset_name}_$(date +%Y%m%d_%H%M%S).log"
+    echo "Saving terminal log to: ${log_file}"
+    
     torchrun --nproc-per-node=4 experiments/profiling/knob5_combined/exp5_accuracy.py \
         --model_path "${MODEL_PATH}" \
         --output_dir "${output_dir}" \
@@ -52,7 +61,7 @@ run_exp5() {
         --top_k 4 8 12 \
         --num_active_blocks 12 13 14 15 16 \
         --sampling_strategy "${SAMPLING_STRATEGY}" \
-        --auto_adjust_batch_size
+        --auto_adjust_batch_size 2>&1 | tee "${log_file}"
     
     echo ""
     echo "Exp5 completed for ${dataset_name}"
@@ -79,6 +88,12 @@ run_exp6() {
     echo "Num samples: ${NUM_SAMPLES} (total across all ranks)"
     echo ""
     
+    # Ensure log directory exists
+    local log_dir="${BASE_OUTPUT_DIR}/logs"
+    mkdir -p "${log_dir}"
+    local log_file="${log_dir}/exp6_${dataset_name}_$(date +%Y%m%d_%H%M%S).log"
+    echo "Saving terminal log to: ${log_file}"
+    
     torchrun --nproc-per-node=4 experiments/profiling/knob5_combined/exp6_accuracy.py \
         --model_path "${MODEL_PATH}" \
         --output_dir "${output_dir}" \
@@ -89,7 +104,7 @@ run_exp6() {
         --top_k 4 8 12 \
         --num_active_blocks 12 13 14 15 16 \
         --num_samples "${NUM_SAMPLES}" \
-        --sampling_strategy "${SAMPLING_STRATEGY}"
+        --sampling_strategy "${SAMPLING_STRATEGY}" 2>&1 | tee "${log_file}"
     
     echo ""
     echo "Exp6 completed for ${dataset_name}"

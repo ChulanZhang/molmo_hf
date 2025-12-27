@@ -1,6 +1,6 @@
 #!/bin/bash
 # Run Experiment 4: Language Tokens vs Latency
-# Usage: bash experiments/motivate/run_exp4.sh [GPU_ID] [--num_samples N] [--max_new_tokens_list ...]
+# Usage: bash experiments/motivate/run_exp4.sh [GPU_ID] [--num_samples N] [--max_new_tokens_list ...] [--use_eos_token]
 
 export CUDA_VISIBLE_DEVICES=${1:-0}
 shift # Remove the first argument (GPU_ID) from $@
@@ -10,8 +10,8 @@ echo "Running Exp 4: Language Tokens vs Latency on GPU $CUDA_VISIBLE_DEVICES..."
 MODEL_PATH="checkpoints"
 DATASET="coco_2014_vqa"
 SPLIT="validation"
-NUM_SAMPLES=50
-OUTPUT_DIR="./results/motivation/exp4-50samples"
+NUM_SAMPLES=5
+OUTPUT_DIR="./results/motivation/exp4-5samples"
 DEVICE="cuda"
 # MAX_NEW_TOKENS_LIST=(8 16 32)
 MAX_NEW_TOKENS_LIST=(8 16 32 64 128 256 512 1024 2048 4096)
@@ -39,6 +39,10 @@ while [[ $# -gt 0 ]]; do
                 shift
             done
             ;;
+        --use_eos_token)
+            USE_EOS_TOKEN="--use_eos_token"
+            shift
+            ;;
         *)
             shift
             ;;
@@ -52,6 +56,7 @@ echo "Model: $MODEL_PATH"
 echo "Dataset: $DATASET ($SPLIT)"
 echo "Samples: $NUM_SAMPLES"
 echo "Max New Tokens: ${MAX_NEW_TOKENS_LIST[*]}"
+echo "Use EOS Token: ${USE_EOS_TOKEN:-disabled (will generate exactly max_new_tokens tokens)}"
 echo "Output: $OUTPUT_DIR"
 echo "=========================================="
 
@@ -62,7 +67,8 @@ python experiments/motivate/exp4_language_tokens_vs_latency.py \
     --num_samples "$NUM_SAMPLES" \
     --output_dir "$OUTPUT_DIR" \
     --device "$DEVICE" \
-    --max_new_tokens_list "${MAX_NEW_TOKENS_LIST[@]}"
+    --max_new_tokens_list "${MAX_NEW_TOKENS_LIST[@]}" \
+    ${USE_EOS_TOKEN:-}
 
 echo ""
 echo "Exp 4 completed! Results saved to $OUTPUT_DIR"

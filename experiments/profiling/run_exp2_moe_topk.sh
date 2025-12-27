@@ -10,7 +10,7 @@ echo "Running Profiling Exp 2: MoE Top-K Analysis on GPU $CUDA_VISIBLE_DEVICES..
 MODEL_PATH="checkpoints"
 OUTPUT_DIR="./results/profiling/moe_topk"
 NUM_SAMPLES=100
-TOP_K_VALUES=(1 2 4 6 8 10 12 14 16 18 20 22 24 26 28 30 32 34 36 38 40 42 44 46 48 50 52 54 56 58 60 62 64)
+TOP_K_VALUES=(2 4 6 8 10 12 14 16 18 20 22 24 26 28 30 32 34 36 38 40 42 44 46 48 50 52 54 56 58 60 62 64)
 
 # Parse optional arguments
 while [[ $# -gt 0 ]]; do

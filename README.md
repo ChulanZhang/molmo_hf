@@ -1,72 +1,62 @@
 # MolmoE-1B
 
-Molmo是由Allen Institute for AI开发的开源视觉-语言模型家族。MolmoE-1B是基于混合专家(MoE)架构的多模态语言模型，具有1.5B活跃参数和7.2B总参数，在同等规模的多模态模型中实现了业界领先的性能。
+Molmo is an open-source vision-language model family from AI2. MolmoE-1B is a multimodal MoE model with ~1.5B active parameters (7.2B total), delivering strong performance among models of similar size.
 
-**了解更多**: [博客文章](https://molmo.allenai.org/blog) | [论文](https://huggingface.co/papers/2409.17146) | [在线Demo](https://molmo.allenai.org/)
+**Learn more**: [Blog](https://molmo.allenai.org/blog) | [Paper](https://huggingface.co/papers/2409.17146) | [Demo](https://molmo.allenai.org/)
 
 ---
-
-## 📁 项目结构
-
+## 📁 Project layout
 ```
 molmo_hf/
-├── molmo/                      # 主Python包
-│   ├── models/                 # 模型架构和配置
-│   ├── preprocessors/          # 数据预处理模块
-│   └── utils/                  # 工具函数
-├── configs/                    # 配置文件
-│   ├── model/                  # 模型配置
-│   └── tokenizer/              # 分词器配置
-├── checkpoints/                # 模型权重文件
-├── experiments/                # 实验脚本
-│   ├── profiling/              # 性能分析实验
-│   └── motivate/               # 基础实验框架
-├── scripts/                    # 示例运行脚本
-├── tests/                      # 测试文件
-├── docs/                       # 文档
-├── setup.py                    # 安装配置
-└── requirements.txt            # 依赖列表
+├── molmo/                      # Core Python package
+│   ├── models/                 # Architecture and configs
+│   ├── preprocessors/          # Data preprocessing
+│   └── utils/                  # Utilities
+├── configs/                    # Config files
+│   ├── model/                  # Model configs
+│   └── tokenizer/              # Tokenizer configs
+├── checkpoints/                # Model weights
+├── experiments/                # Experiment scripts
+│   ├── profiling/              # Performance profiling
+│   └── motivate/               # Core experiment framework
+├── scripts/                    # Helper scripts
+├── tests/                      # Tests
+├── docs/                       # Documentation
+├── setup.py                    # Package setup
+└── requirements.txt            # Dependencies
 ```
 
 ---
+## 🚀 Quickstart
 
-## 🚀 快速开始
-
-### 安装
-
-**从源码安装（推荐用于开发）**
-
+### Installation
+**From source (recommended for dev)**
 ```bash
 git clone <repository-url>
 cd molmo_hf
-# 基础安装
+# Base install
 pip install -e .
-
-# 包含实验工具
+# With experiment tools
 pip install -e ".[experiments]"
-
-# 包含训练工具（wandb等）
+# With training tools (wandb, etc.)
 pip install -e ".[train]"
-
-# 包含所有依赖
+# Everything
 pip install -e ".[all]"
 ```
 
-**注意**: 本项目是 molmo 的 HuggingFace 兼容版本，主要区别是使用 PyTorch 实现 MoE 架构（而非 megablocks），便于进行动态 MoE topK 等实验。
-## 🧪 实验与性能分析
+**Note**: This is the HF-compatible version of Molmo using PyTorch for MoE (not megablocks), making dynamic MoE topK experiments easier.
 
-本项目包含完整的实验套件，用于分析模型延迟和性能。
+## 🧪 Experiments & profiling
+The repo includes a full experiment suite for latency/perf analysis.
+See `docs/experiment_usage.md` for details.
 
-详细文档请参考：[docs/experiment_usage.md](docs/experiment_usage.md)
-
-### 快速开始
-
-**1. Motivation Study (All Experiments)**
+### Quick run
+**1. Motivation study (all experiments)**
 ```bash
 # Run all experiments in sequence
 bash experiments/motivate/run_all_experiments.sh [GPU_ID]
 
-# Or run individual experiments
+# Or run individually
 python experiments/motivate/exp1_latency_distribution.py --model_path checkpoints --num_samples 5000
 python experiments/motivate/exp2_component_profiling.py --model_path checkpoints --num_samples 1000
 python experiments/motivate/exp3_vision_tokens_vs_latency.py --model_path checkpoints
@@ -74,26 +64,25 @@ python experiments/motivate/exp4_language_tokens_vs_latency.py --model_path chec
 python experiments/motivate/exp5_flops_vs_latency.py --exp3_results ... --exp4_results ...
 ```
 
-**2. Profiling Experiments (Control Knobs)**
+**2. Profiling experiments (knobs)**
 ```bash
-# Knob 1: Context Scaling
+# Knob 1: Context scaling
 python experiments/profiling/knob1_tokens/exp_context_scaling.py
 
 # Knob 2: MoE Top-K
 python experiments/profiling/knob2_topk/exp_moe_topk.py
 
-# Knob 3: Layer Skipping
+# Knob 3: Layer skipping
 python experiments/profiling/knob3_layers/exp_layer_skipping.py
 ```
 
-### 基础使用
-
+### Basic usage
 ```python
 from transformers import AutoModelForCausalLM, AutoProcessor, GenerationConfig
 from PIL import Image
 import requests
 
-# 从本地加载模型和处理器
+# Load model and processor locally
 model = AutoModelForCausalLM.from_pretrained(
     './molmo_hf',
     trust_remote_code=True,
@@ -108,16 +97,31 @@ processor = AutoProcessor.from_pretrained(
     device_map='auto'
 )
 
-# 处理图像和文本
+# Process image + text
 inputs = processor.process(
     images=[Image.open(requests.get("https://picsum.photos/id/237/536/354", stream=True).raw)],
     text="Describe this image."
 )
 
-# 生成输入批次
+# Batch and move to device
 inputs = {k: v.to(model.device).unsqueeze(0) for k, v in inputs.items()}
 
-# 生成输出
+# Generate
 output = model.generate_from_batch(
     inputs,
-    GenerationConfig(max_new_tokens=200, stop_strings="
+    GenerationConfig(max_new_tokens=200, stop_strings="\n\n")
+)
+print(processor.decode(output[0]))
+```
+
+---
+
+## 📊 Results & evaluation
+- Core evaluation and profiling scripts live under `experiments/`.
+- Metrics/plots are stored under `experiments/profiling/plots/` and `results/`.
+
+## 🧰 Troubleshooting
+- Ensure CUDA/cuDNN match your PyTorch build.
+- Some experiments require specific datasets; see `docs/ALL_9_DATASETS_DATA_REQUIREMENTS.md`.
+- For precise vision token control and image-size knobs, see `docs/knobs/vision_tokens_precise_control_analysis.md`.
+

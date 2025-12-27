@@ -1,5 +1,5 @@
 """
-测试训练模块
+Tests for training modules.
 """
 import pytest
 import sys
@@ -10,15 +10,15 @@ sys.path.insert(0, str(project_root))
 
 
 class TestTrainModules:
-    """测试训练模块"""
+    """Validate training modules."""
     
     def test_trainer_import(self):
-        """测试 Trainer 的导入"""
+        """Import Trainer."""
         from molmo.train import Trainer
         assert Trainer is not None
     
     def test_optimizer_import(self):
-        """测试优化器的导入"""
+        """Import optimizers."""
         from molmo.optim import Optimizer, Scheduler
         from molmo.optim import build_optimizer, build_scheduler
         assert Optimizer is not None
@@ -27,16 +27,16 @@ class TestTrainModules:
         assert callable(build_scheduler)
     
     def test_checkpoint_import(self):
-        """测试检查点模块的导入"""
+        """Import checkpoint helpers."""
         from molmo.checkpoint import Checkpointer, load_model_state
         assert Checkpointer is not None
         assert callable(load_model_state)
     
     def test_trainer_class_structure(self):
-        """测试 Trainer 类的结构"""
+        """Inspect Trainer structure."""
         from molmo.train import Trainer
         
-        # 检查 Trainer 类的主要属性
+        # Check key Trainer attributes
         assert hasattr(Trainer, '__init__')
         assert hasattr(Trainer, 'train')
         assert hasattr(Trainer, 'evaluate')
@@ -44,7 +44,7 @@ class TestTrainModules:
         assert hasattr(Trainer, 'load_checkpoint')
     
     def test_optimizer_types(self):
-        """测试优化器类型"""
+        """Import optimizer types."""
         from molmo.optim import OptimizerType, AdamW, LionW
         
         assert OptimizerType is not None
@@ -52,7 +52,7 @@ class TestTrainModules:
         assert LionW is not None
     
     def test_scheduler_types(self):
-        """测试调度器类型"""
+        """Import scheduler types."""
         from molmo.optim import SchedulerType, CosWithWarmup, LinearWithWarmup
         
         assert SchedulerType is not None

@@ -79,7 +79,7 @@ class PixMoCount(Dataset):
         all_data = datasets.DatasetDict()
         for split in ["validation", "test", "train"]:
             ds = datasets.load_dataset("allenai/pixmo-count", split=split)
-            url_to_filename = download_pixmo_urls(ds, n_procs, check_sha=check_sha, cache_only=cache_only, verify=False)
+            url_to_filename = download_pixmo_urls(ds, n_procs, check_sha, cache_only=cache_only, verify=False)
             ds = ds.filter(lambda x: x in url_to_filename, input_columns=["image_url"])
             ds = ds.add_column("image", [url_to_filename[x] for x in ds["image_url"]])
             all_data[split] = ds
@@ -170,7 +170,7 @@ class PixMoPoints(Dataset):
         if all(exists(x) for x in local_names):
             return
         ds = datasets.load_dataset("allenai/pixmo-points", split="train")
-        filenames = download_pixmo_urls(ds, n_procs, check_sha=check_sha, cache_only=cache_only, verify=VERIFY)
+        filenames = download_pixmo_urls(ds, n_procs, check_sha, cache_only=cache_only, verify=VERIFY)
         if hold_out_pointing_eval:
             eval_ds = datasets.load_dataset("allenai/pixmo-points-eval", split="test")
             for url in eval_ds["image_url"]:
@@ -234,9 +234,16 @@ class PixMoPointExplanations(Dataset):
         local_name = join(PIXMO_DATASETS, "point-explanations")
         if exists(local_name):
             return
-        ds = datasets.load_dataset("allenai/pixmo-point-explanations", split="train")
+        try:
+            ds = datasets.load_dataset("allenai/pixmo-point-explanations", split="train")
+        except Exception:
+            dataset_dict = datasets.load_dataset("allenai/pixmo-point-explanations")
+            if isinstance(dataset_dict, datasets.DatasetDict):
+                ds = dataset_dict["train"]
+            else:
+                ds = dataset_dict
         ds = ds.filter(lambda x: x is not None, input_columns=["parsed_response"])
-        filenames = download_pixmo_urls(ds, n_procs, check_sha=check_sha, cache_only=cache_only, verify=VERIFY)
+        filenames = download_pixmo_urls(ds, n_procs, check_sha, cache_only=cache_only, verify=VERIFY)
         filtered_dataset = filter_and_group_data(ds, filenames, check_sha)
         save_local_dataset(filtered_dataset, local_name, n_procs, n_val=n_val)
 
@@ -291,7 +298,7 @@ class PixMoCapQa(Dataset):
         if exists(local_name):
             return
         ds = datasets.load_dataset("allenai/pixmo-cap-qa", split="train")
-        filenames = download_pixmo_urls(ds, n_procs, check_sha=check_sha, cache_only=cache_only, verify=VERIFY)
+        filenames = download_pixmo_urls(ds, n_procs, check_sha, cache_only=cache_only, verify=VERIFY)
         filtered_dataset = filter_and_group_data(ds, filenames, check_sha)
         save_local_dataset(filtered_dataset, local_name, n_procs, n_val=n_val)
 
@@ -334,10 +341,19 @@ class PixMoCap(Dataset):
         local_name = join(PIXMO_DATASETS, "cap")
         if exists(local_name):
             return
-        ds = datasets.load_dataset("allenai/pixmo-cap", split="train")
+        try:
+            # Try loading with split parameter first
+            ds = datasets.load_dataset("allenai/pixmo-cap", split="train")
+        except Exception:
+            # Fallback: load without split and extract train
+            dataset_dict = datasets.load_dataset("allenai/pixmo-cap")
+            if isinstance(dataset_dict, datasets.DatasetDict):
+                ds = dataset_dict["train"]
+            else:
+                ds = dataset_dict
         if sample:
             ds = ds.take(sample)
-        url_to_filename = download_pixmo_urls(ds, n_procs, check_sha=check_sha, cache_only=cache_only, verify=VERIFY)
+        url_to_filename = download_pixmo_urls(ds, n_procs, check_sha, cache_only=cache_only, verify=VERIFY)
         logging.info("Preparing data...")
         filtered_dataset = ds.filter(lambda x: x in url_to_filename, input_columns=["image_url"])
         filtered_dataset = filtered_dataset.add_column(
@@ -389,7 +405,7 @@ class PixMoAskModelAnything(Dataset):
         if exists(local_name):
             return
         ds = datasets.load_dataset("allenai/pixmo-ask-model-anything", split="train")
-        filenames = download_pixmo_urls(ds, n_procs, check_sha=check_sha, cache_only=cache_only, verify=VERIFY)
+        filenames = download_pixmo_urls(ds, n_procs, check_sha, cache_only=cache_only, verify=VERIFY)
         filtered_dataset = filter_and_group_data(ds, filenames, check_sha)
         save_local_dataset(filtered_dataset, local_name, n_procs, n_val=n_val)
 
@@ -436,8 +452,15 @@ class PixMoPointsEval(Dataset):
         local_name = join(PIXMO_DATASETS, "pixmo-points-eval")
         if exists(local_name):
             return
-        ds = datasets.load_dataset("allenai/pixmo-points-eval", split="test")
-        url_to_filename = download_pixmo_urls(ds, n_procs, check_sha=check_sha, cache_only=cache_only, verify=VERIFY)
+        try:
+            ds = datasets.load_dataset("allenai/pixmo-points-eval", split="test")
+        except Exception:
+            dataset_dict = datasets.load_dataset("allenai/pixmo-points-eval")
+            if isinstance(dataset_dict, datasets.DatasetDict):
+                ds = dataset_dict["test"]
+            else:
+                ds = dataset_dict
+        url_to_filename = download_pixmo_urls(ds, n_procs, check_sha, cache_only=cache_only, verify=VERIFY)
         ds = ds.filter(lambda x: x in url_to_filename, input_columns=["image_url"])
         ds = ds.add_column("image", [url_to_filename[x] for x in ds["image_url"]])
         save_local_dataset(ds, local_name, n_procs)

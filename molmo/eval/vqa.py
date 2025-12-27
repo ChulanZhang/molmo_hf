@@ -55,8 +55,8 @@ punct = [
     '(', ')', '=', '+', '\\', '_', '-',
     '>', '<', '@', '`', ',', '?', '!']
 
-periodStrip = re.compile("(?!<=\d)(\.)(?!\d)")
-commaStrip = re.compile("(\d)(\,)(\d)")
+periodStrip = re.compile(r"(?!<=\d)(\.)(?!\d)")
+commaStrip = re.compile(r"(\d)(\,)(\d)")
 
 
 def processPunctuation(inText):
@@ -245,6 +245,50 @@ def real_world_qa_score(
         gt = preprocess_answer(target)
         score = float(pred == gt)
     return score
+
+
+def cider_score(targets: List[str], pred: str) -> float:
+    """
+    Compute a simplified CIDEr-like score for caption evaluation.
+    
+    This is a simplified version that uses token overlap. For full CIDEr evaluation,
+    consider using pycocoevalcap library.
+    
+    Args:
+        targets: List of reference captions (typically 5 for COCO)
+        pred: Predicted caption
+    
+    Returns:
+        Score between 0 and 1 (higher is better)
+    """
+    if not targets:
+        return 0.0
+    
+    # Preprocess prediction
+    pred_processed = preprocess_answer(pred)
+    pred_tokens = set(pred_processed.split())
+    
+    if not pred_tokens:
+        return 0.0
+    
+    # Compute maximum overlap with any reference caption
+    max_overlap = 0.0
+    for target in targets:
+        target_processed = preprocess_answer(target)
+        target_tokens = set(target_processed.split())
+        
+        if not target_tokens:
+            continue
+        
+        # Compute token overlap (Jaccard similarity)
+        intersection = len(pred_tokens & target_tokens)
+        union = len(pred_tokens | target_tokens)
+        
+        if union > 0:
+            overlap = intersection / union
+            max_overlap = max(max_overlap, overlap)
+    
+    return max_overlap
 
 
 def math_vista_score(

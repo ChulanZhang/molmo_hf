@@ -54,6 +54,11 @@ def get_metric_for_dataset(dataset_name: str) -> str:
         "coco_2014_vqa_multi": "vqa_score",
         "text_vqa": "vqa_score",
         "okvqa": "vqa_score",
+        "mmmu": "mmmu_score",  # MMMU uses special mmmu_score metric
+        
+        # Caption datasets (use cider_score for COCO Caption)
+        "coco_caption": "cider_score",
+        "coco_captioning": "cider_score",
         
         # Multiple choice datasets
         "science_qa_img": "mc",
@@ -309,6 +314,8 @@ class BaseExperiment(ABC):
         measure_components: bool = True,
         num_runs: int = 1,
         use_hook_for_llm_prefill: bool = False,
+        return_output: bool = False,
+        use_eos_token: bool = True,
     ) -> Dict[str, float]:
         """
         Measure end-to-end inference latency and component latencies.
@@ -320,9 +327,13 @@ class BaseExperiment(ABC):
             num_runs: Number of runs to average over (for stability).
             use_hook_for_llm_prefill: If True, use forward hooks to directly measure LLM prefill.
                                      If False (default), use subtraction method (T_prefill_step - T_vision_total).
+            return_output: If True, include the generated output tensor in the results.
+            use_eos_token: If True, enable early stopping when EOS token is generated.
+                          If False, model will generate exactly max_new_tokens tokens (for profiling experiments).
             
         Returns:
             Dictionary with latency measurements (ms) and token counts.
+            If return_output=True, also includes 'generated_output' key with the output tensor.
         """
         # 1. Move batch to device
         try:
@@ -527,7 +538,32 @@ class BaseExperiment(ABC):
                         torch.cuda.empty_cache()
                     
                     from transformers import GenerationConfig
-                    generation_config = GenerationConfig(max_new_tokens=max_new_tokens, use_cache=True)
+                    
+                    # Get EOS and PAD token IDs for early stopping
+                    # This allows the model to stop early when generating EOS token
+                    eos_token_id = None
+                    pad_token_id = None
+                    
+                    if use_eos_token:
+                        eos_token_id = self.tokenizer.eos_token_id
+                        if eos_token_id is None:
+                            eos_token_id = getattr(self.model.config, 'eos_token_id', None)
+                        
+                        pad_token_id = self.tokenizer.pad_token_id
+                        if pad_token_id is None:
+                            pad_token_id = getattr(self.model.config, 'pad_token_id', None)
+                    
+                    # Build generation config
+                    generation_config_kwargs = {
+                        "max_new_tokens": max_new_tokens,
+                        "use_cache": True,
+                    }
+                    if use_eos_token and eos_token_id is not None:
+                        generation_config_kwargs["eos_token_id"] = eos_token_id
+                    if pad_token_id is not None:
+                        generation_config_kwargs["pad_token_id"] = pad_token_id
+                    
+                    generation_config = GenerationConfig(**generation_config_kwargs)
                     
                     output = self.model.generate(
                         input_ids=batch["input_ids"],
@@ -588,6 +624,10 @@ class BaseExperiment(ABC):
                      results["num_output_tokens"] = int(output.shape[1])
         else:
             results["num_output_tokens"] = 0
+        
+        # Store output if requested
+        if return_output and output is not None:
+            results["generated_output"] = output
         
         # Count vision tokens (if available)
         # Use image_input_idx to count valid vision tokens
@@ -852,8 +892,28 @@ class BaseExperiment(ABC):
             else:
                 pred_text = " ".join(pred_text.strip().split())
             
-            # Get ground truth answers
+            # Get ground truth answers and metadata
             metadata = metadatas[i] if i < len(metadatas) else {}
+            
+            # Build a compact, JSON-serializable snapshot of the most important
+            # metadata fields so that profiling results can later recover
+            # image/question identifiers, etc.
+            important_meta_keys = [
+                "image_id",
+                "example_id",
+                "question",
+                "question_id",
+                "question_type",
+                "options",
+                "answer_idx",
+                "answers",
+                "answer",
+                "captions",  # For COCO Caption
+                "caption_id",  # For COCO Caption
+            ]
+            sample_metadata = {
+                k: v for k, v in metadata.items() if k in important_meta_keys
+            }
             
             # Compute score based on metric type
             if metric_name == "mc":
@@ -867,7 +927,8 @@ class BaseExperiment(ABC):
                         "score": 0.0,
                         "pred": pred_text,
                         "answer_idx": metadata.get("answer_idx", -1),
-                        "options": metadata.get("options", [])
+                        "options": metadata.get("options", []),
+                        "metadata": sample_metadata,
                     })
                 else:
                     options = metadata["options"]
@@ -910,9 +971,97 @@ class BaseExperiment(ABC):
                         "pred": pred_text,
                         "answer_idx": int(correct_idx),
                         "predicted_idx": int(predicted_idx),
-                        "options": options
+                        "options": options,
+                        "metadata": sample_metadata,
                     })
                 scores.append(score)
+            elif metric_name == "mmmu_score":
+                # MMMU evaluation (supports both multiple-choice and open questions)
+                # MMMU dataset stores answer in metadata["answer"], not metadata["answers"]
+                from molmo.eval.vqa import mmmu_score
+                
+                # Extract answer from metadata (MMMU uses "answer" not "answers")
+                if "answer" in metadata:
+                    answer = metadata["answer"]
+                    target = [answer] if isinstance(answer, str) else answer
+                elif "answers" in metadata:
+                    answers = metadata["answers"]
+                    target = [answers] if isinstance(answers, str) else answers
+                else:
+                    log.warning(f"Sample {i} has no answer in metadata for MMMU evaluation")
+                    scores.append(0.0)
+                    per_sample_scores.append({
+                        "sample_id": i,
+                        "score": 0.0,
+                        "pred": pred_text,
+                        "answer": None,
+                        "metadata": sample_metadata,
+                    })
+                    continue
+                
+                # Get question_type and options from metadata
+                # Note: For MMMU, options might be in the original example but not in metadata
+                # We need to check both metadata and potentially the batch itself
+                question_type = metadata.get("question_type", "open")
+                options = metadata.get("options", [])
+                
+                # If options not in metadata, try to get from batch (if available)
+                # This handles cases where options are in the example but not merged into metadata
+                if not options and "options" in batch:
+                    # If batch has options, try to get the one for this sample
+                    batch_options = batch.get("options", [])
+                    if isinstance(batch_options, list) and i < len(batch_options):
+                        options = batch_options[i] if batch_options[i] else []
+                
+                # Prepare metadata dict for mmmu_score
+                mmmu_metadata = {
+                    "question_type": question_type,
+                    "options": options
+                }
+                
+                # mmmu_score expects:
+                # - target: List[str] - ground truth answer(s)
+                # - response: str - model prediction
+                # - metadata: dict with question_type and options
+                if isinstance(target, str):
+                    target = [target]
+                score = mmmu_score(target, pred_text, mmmu_metadata)
+                
+                scores.append(score)
+                per_sample_scores.append({
+                    "sample_id": i,
+                    "score": float(score),
+                    "pred": pred_text,
+                    "answer": target[0] if target else None,
+                    "question_type": question_type,
+                    "options": options,
+                    "metadata": sample_metadata,
+                })
+            elif metric_name == "cider_score":
+                # Standard COCO Caption evaluation using pycocoevalcap
+                # For COCO Caption, metadata contains "captions" (list of reference captions)
+                # We collect all predictions and references, then evaluate at the end
+                if "captions" in metadata:
+                    # Use captions from metadata (COCO Caption format)
+                    reference_captions = metadata["captions"]
+                    if isinstance(reference_captions, str):
+                        reference_captions = [reference_captions]
+                else:
+                    log.warning(f"Sample {i} has no captions in metadata for COCO Caption evaluation")
+                    reference_captions = []
+                
+                # Store per-sample data for batch evaluation
+                per_sample_scores.append({
+                    "sample_id": i,
+                    "pred": pred_text,
+                    "captions": reference_captions if isinstance(reference_captions, list) else [reference_captions],
+                    "metadata": sample_metadata,
+                })
+                # Note: We don't compute score here - it will be computed in batch mode
+                # For now, we'll use a placeholder score of 0.0, but the actual evaluation
+                # should be done after collecting all samples using evaluate_coco_caption_from_batch_results
+                scores.append(0.0)  # Placeholder - will be replaced by batch evaluation
+                continue
             else:
                 # For other metrics, extract answers first
                 if "answers" in metadata:
@@ -929,7 +1078,8 @@ class BaseExperiment(ABC):
                         "sample_id": i,
                         "score": 0.0,
                         "pred": pred_text,
-                        "answers": []
+                        "answers": [],
+                        "metadata": sample_metadata,
                     })
                     continue
                 
@@ -963,8 +1113,79 @@ class BaseExperiment(ABC):
                     "sample_id": i,
                     "score": float(score),
                     "pred": pred_text,
-                    "answers": answers if isinstance(answers, list) else [answers]
+                    "answers": answers if isinstance(answers, list) else [answers],
+                    "metadata": sample_metadata,
                 })
+        
+        # For COCO Caption, use standard batch evaluation with pycocoevalcap
+        if metric_name == "cider_score":
+            try:
+                from molmo.eval.coco_caption_eval import evaluate_coco_caption_from_batch_results
+                # Evaluate using standard COCO metrics
+                coco_metrics = evaluate_coco_caption_from_batch_results(per_sample_scores)
+                
+                # Use CIDEr as the primary accuracy metric
+                avg_accuracy = coco_metrics.get("CIDEr", 0.0)
+                
+                # Update per_sample_scores with CIDEr scores
+                # Note: Standard COCO evaluation is corpus-level, so we use the corpus-level CIDEr
+                # for all samples as an approximation
+                for sample_score in per_sample_scores:
+                    sample_score["score"] = float(avg_accuracy)
+                    sample_score["coco_metrics"] = coco_metrics  # Store all metrics for reference
+                
+                # Log COCO metrics at DEBUG level to reduce terminal output
+                log.debug(f"COCO Caption evaluation metrics: {coco_metrics}")
+                
+                return {
+                    "accuracy": float(avg_accuracy),
+                    "per_sample_scores": per_sample_scores,
+                    "num_samples": len(scores),
+                    "coco_metrics": coco_metrics,  # Include all COCO metrics (CIDEr, BLEU, METEOR, etc.)
+                }
+            except ImportError:
+                log.debug(
+                    "pycocoevalcap not available, falling back to simplified CIDEr score. "
+                    "Install with: pip install pycocoevalcap pycocotools"
+                )
+                # Fallback to simplified evaluation
+                from molmo.eval.vqa import cider_score
+                for i, sample_score in enumerate(per_sample_scores):
+                    ref_captions = sample_score.get("captions", [])
+                    pred_text = sample_score.get("pred", "")
+                    if ref_captions:
+                        score = cider_score(ref_captions, pred_text)
+                        sample_score["score"] = float(score)
+                        scores[i] = score
+                    else:
+                        sample_score["score"] = 0.0
+                        scores[i] = 0.0
+                avg_accuracy = np.mean(scores) if scores else 0.0
+                return {
+                    "accuracy": float(avg_accuracy),
+                    "per_sample_scores": per_sample_scores,
+                    "num_samples": len(scores),
+                }
+            except Exception as e:
+                log.debug(f"Error in COCO Caption evaluation: {e}, falling back to simplified CIDEr score")
+                # Fallback to simplified evaluation
+                from molmo.eval.vqa import cider_score
+                for i, sample_score in enumerate(per_sample_scores):
+                    ref_captions = sample_score.get("captions", [])
+                    pred_text = sample_score.get("pred", "")
+                    if ref_captions:
+                        score = cider_score(ref_captions, pred_text)
+                        sample_score["score"] = float(score)
+                        scores[i] = score
+                    else:
+                        sample_score["score"] = 0.0
+                        scores[i] = 0.0
+                avg_accuracy = np.mean(scores) if scores else 0.0
+                return {
+                    "accuracy": float(avg_accuracy),
+                    "per_sample_scores": per_sample_scores,
+                    "num_samples": len(scores),
+                }
         
         avg_accuracy = np.mean(scores) if scores else 0.0
         

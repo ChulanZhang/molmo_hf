@@ -1,24 +1,24 @@
 """
-Pytest 配置和共享 fixtures
+Pytest configuration and shared fixtures.
 """
 import pytest
 import sys
 from pathlib import Path
 
-# 添加项目根目录到路径
+# Add project root to path
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
 
 @pytest.fixture(scope="session")
 def project_root_path():
-    """返回项目根目录路径"""
+    """Return project root path."""
     return Path(__file__).parent.parent
 
 
 @pytest.fixture(scope="session")
 def test_data_dir(project_root_path):
-    """返回测试数据目录路径"""
+    """Return test data directory."""
     test_data = project_root_path / "tests" / "data"
     test_data.mkdir(exist_ok=True)
     return test_data
@@ -26,7 +26,7 @@ def test_data_dir(project_root_path):
 
 @pytest.fixture(scope="session")
 def sample_config():
-    """返回一个示例配置"""
+    """Return a sample ModelConfig."""
     from molmo.config import ModelConfig
     
     return ModelConfig(
@@ -40,7 +40,7 @@ def sample_config():
 
 @pytest.fixture(scope="session")
 def sample_molmo_config():
-    """返回一个示例 MolmoConfig"""
+    """Return a sample MolmoConfig."""
     from molmo.models.config_molmoe import MolmoConfig
     
     return MolmoConfig(

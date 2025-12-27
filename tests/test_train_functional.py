@@ -1,5 +1,5 @@
 """
-训练功能测试：测试训练相关的实际功能
+Training functional tests: validate real training behaviors.
 """
 import pytest
 import torch
@@ -11,10 +11,10 @@ sys.path.insert(0, str(project_root))
 
 
 class TestTrainFunctional:
-    """测试训练模块的实际功能"""
+    """Validate training module functionality."""
     
     def test_optimizer_creation(self):
-        """测试优化器的创建"""
+        """Create optimizer."""
         from molmo.optim import build_optimizer, OptimizerType
         from molmo.models.config_molmoe import MolmoConfig
         from molmo.models.modeling_molmoe import MolmoModel
@@ -32,7 +32,7 @@ class TestTrainFunctional:
         
         model = MolmoModel(config)
         
-        # 测试创建优化器
+        # Build optimizer
         optimizer = build_optimizer(
             model,
             optimizer_type=OptimizerType.adamw,
@@ -44,7 +44,7 @@ class TestTrainFunctional:
         print("✓ Optimizer creation works")
     
     def test_scheduler_creation(self):
-        """测试调度器的创建"""
+        """Create scheduler."""
         from molmo.optim import build_scheduler, SchedulerType
         from molmo.models.config_molmoe import MolmoConfig
         from molmo.models.modeling_molmoe import MolmoModel
@@ -64,7 +64,7 @@ class TestTrainFunctional:
         model = MolmoModel(config)
         optimizer = build_optimizer(model, optimizer_type="adamw", learning_rate=1e-4)
         
-        # 测试创建调度器
+        # Build scheduler
         scheduler = build_scheduler(
             optimizer,
             scheduler_type=SchedulerType.cosine_with_warmup,
@@ -76,7 +76,7 @@ class TestTrainFunctional:
         print("✓ Scheduler creation works")
     
     def test_checkpoint_save_load(self, tmp_path):
-        """测试检查点的保存和加载"""
+        """Create a checkpointer (save/load)."""
         from molmo.checkpoint import Checkpointer
         from molmo.models.config_molmoe import MolmoConfig
         from molmo.models.modeling_molmoe import MolmoModel
@@ -94,11 +94,11 @@ class TestTrainFunctional:
         
         model = MolmoModel(config)
         
-        # 创建检查点目录
+        # Create checkpoint directory
         checkpoint_dir = tmp_path / "checkpoint"
         checkpoint_dir.mkdir()
         
-        # 测试保存检查点
+        # Instantiate checkpointer
         checkpointer = Checkpointer(checkpoint_dir)
         # checkpointer.save_checkpoint(model, step=0)
         
@@ -106,7 +106,7 @@ class TestTrainFunctional:
         print("✓ Checkpointer can be created")
     
     def test_training_step_simulation(self):
-        """模拟一个训练步骤"""
+        """Simulate one training step."""
         from molmo.models.config_molmoe import MolmoConfig
         from molmo.models.modeling_molmoe import MolmoModel
         from molmo.optim import build_optimizer
@@ -127,7 +127,7 @@ class TestTrainFunctional:
         
         optimizer = build_optimizer(model, optimizer_type="adamw", learning_rate=1e-4)
         
-        # 模拟一个训练步骤
+        # Simulate one training step
         batch_size = 2
         seq_len = 10
         input_ids = torch.randint(0, config.vocab_size, (batch_size, seq_len))

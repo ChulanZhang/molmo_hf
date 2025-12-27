@@ -1,5 +1,5 @@
 """
-GRPO训练器
+GRPO trainer.
 """
 
 import torch
@@ -15,7 +15,7 @@ log = logging.getLogger(__name__)
 
 
 class ControllerDataset(Dataset):
-    """Controller训练数据集"""
+    """Controller training dataset."""
     
     def __init__(self, training_data: List[Dict]):
         self.data = training_data
@@ -26,7 +26,7 @@ class ControllerDataset(Dataset):
     def __getitem__(self, idx):
         item = self.data[idx]
         
-        # 将配置值映射到索引
+        # Map config values to indices
         max_crops_options = [2, 4, 6, 8, 10, 12]
         top_k_options = [4, 8, 12, 16, 20, 24, 28, 32]
         blocks_options = [8, 9, 10, 11, 12, 13, 14, 15, 16]
@@ -49,7 +49,7 @@ class ControllerDataset(Dataset):
 
 
 class GRPOTrainer:
-    """GRPO训练器"""
+    """GRPO trainer."""
     
     def __init__(
         self,
@@ -80,19 +80,19 @@ class GRPOTrainer:
         group_size: int,
     ) -> List[Dict[str, torch.Tensor]]:
         """
-        将批次数据分组
-        
+        Group batch data.
+
         Args:
-            batch: 批次数据
-            group_size: 组大小
-        
+            batch: batch tensors
+            group_size: group size
+
         Returns:
-            分组后的数据列表
+            list of grouped data dicts
         """
         batch_size = batch['image_feature'].shape[0]
         groups = []
         
-        # 按延迟预算分组（相同预算的样本在一组）
+        # Group by latency budget (same budget in one group)
         budget_values = batch['latency_budget'].cpu().numpy()
         unique_budgets = np.unique(budget_values)
         
@@ -100,11 +100,11 @@ class GRPOTrainer:
             mask = budget_values == budget
             indices = np.where(mask)[0]
             
-            # 将indices分成多个组
+            # Split indices into groups
             for i in range(0, len(indices), group_size):
                 group_indices = indices[i:i+group_size]
                 if len(group_indices) < 2:
-                    continue  # 跳过太小的组
+                    continue  # skip groups that are too small
                 
                 group = {}
                 for key, value in batch.items():
@@ -122,14 +122,14 @@ class GRPOTrainer:
         groups: List[Dict[str, torch.Tensor]],
     ) -> torch.Tensor:
         """
-        计算组内相对优势
-        
+        Compute per-group relative advantages.
+
         Args:
-            rewards: (B,) 奖励值
-            groups: 分组数据
-        
+            rewards: (B,) reward values
+            groups: grouped data
+
         Returns:
-            advantages: (B,) 优势值
+            advantages: (B,) advantage values
         """
         advantages = torch.zeros_like(rewards)
         
@@ -138,10 +138,10 @@ class GRPOTrainer:
             group_size = group['image_feature'].shape[0]
             group_rewards = rewards[start_idx:start_idx+group_size]
             
-            # 计算组内平均奖励
+            # Mean reward per group
             group_mean = group_rewards.mean()
             
-            # 计算相对优势
+            # Relative advantage
             group_advantages = group_rewards - group_mean
             
             advantages[start_idx:start_idx+group_size] = group_advantages
@@ -154,32 +154,32 @@ class GRPOTrainer:
         batch: Dict[str, torch.Tensor],
     ) -> Dict[str, float]:
         """
-        执行一个训练步骤
-        
+        Run one training step.
+
         Args:
-            batch: 批次数据
-        
+            batch: batch tensors
+
         Returns:
-            训练指标
+            training metrics
         """
         self.controller.train()
         self.optimizer.zero_grad()
         
-        # 前向传播
+        # Forward
         logits = self.controller(
             image_feat=batch['image_feature'].to(self.device),
             lang_feat=batch['language_feature'].to(self.device),
             budget=batch['latency_budget'].to(self.device),
         )
         
-        # 计算reward
+        # Compute reward
         actions = {
             'max_crops_idx': batch['max_crops_idx'].to(self.device),
             'top_k_idx': batch['top_k_idx'].to(self.device),
             'blocks_idx': batch['blocks_idx'].to(self.device),
         }
         
-        # 映射索引到实际值（用于reward计算）
+        # Map indices to actual values (for reward computation)
         max_crops_options = [2, 4, 6, 8, 10, 12]
         top_k_options = [4, 8, 12, 16, 20, 24, 28, 32]
         blocks_options = [8, 9, 10, 11, 12, 13, 14, 15, 16]
@@ -200,22 +200,22 @@ class GRPOTrainer:
             config=config,
         )
         
-        # 分组并计算优势
+        # Group trajectories and compute advantages
         groups = self.group_trajectories(batch, self.group_size)
         advantages = self.compute_advantages(rewards, groups)
         
-        # 计算对数概率
+        # Compute log probabilities
         log_probs = self.controller.compute_log_probs(logits, actions)
         
-        # 计算损失（策略梯度）
+        # Loss (policy gradient)
         loss = -(log_probs * advantages).mean()
         
-        # 反向传播
+        # Backward
         loss.backward()
         torch.nn.utils.clip_grad_norm_(self.controller.parameters(), max_norm=1.0)
         self.optimizer.step()
         
-        # 记录指标
+        # Log metrics
         metrics = {
             'loss': loss.item(),
             'reward_mean': rewards.mean().item(),
@@ -235,19 +235,19 @@ class GRPOTrainer:
         save_every: int = 10,
     ):
         """
-        训练循环
-        
+        Training loop.
+
         Args:
-            train_loader: 训练数据加载器
-            num_epochs: 训练轮数
-            val_loader: 验证数据加载器（可选）
-            save_dir: 保存目录
-            save_every: 每N个epoch保存一次
+            train_loader: training dataloader
+            num_epochs: number of epochs
+            val_loader: optional validation dataloader
+            save_dir: directory to save checkpoints
+            save_every: save every N epochs
         """
         best_val_reward = float('-inf')
         
         for epoch in range(num_epochs):
-            # 训练阶段
+            # Train phase
             self.controller.train()
             epoch_metrics = {
                 'loss': [],
@@ -263,20 +263,20 @@ class GRPOTrainer:
                     if key in epoch_metrics:
                         epoch_metrics[key].append(value)
                 
-                # 更新进度条
+                # Update progress bar
                 pbar.set_postfix({
                     'loss': f"{metrics['loss']:.4f}",
                     'reward': f"{metrics['reward_mean']:.4f}",
                 })
             
-            # 计算epoch平均指标
+            # Epoch averages
             avg_metrics = {k: np.mean(v) for k, v in epoch_metrics.items()}
             log.info(f"Epoch {epoch+1}: {avg_metrics}")
             
             self.train_losses.append(avg_metrics['loss'])
             self.train_rewards.append(avg_metrics['reward_mean'])
             
-            # 验证阶段
+            # Validation phase
             if val_loader is not None:
                 val_metrics = self.validate(val_loader)
                 log.info(f"Validation: {val_metrics}")
@@ -286,7 +286,7 @@ class GRPOTrainer:
                     if save_dir:
                         self.save_checkpoint(save_dir, epoch, is_best=True)
             
-            # 定期保存
+            # Periodic save
             if save_dir and (epoch + 1) % save_every == 0:
                 self.save_checkpoint(save_dir, epoch, is_best=False)
     
@@ -295,13 +295,13 @@ class GRPOTrainer:
         val_loader: DataLoader,
     ) -> Dict[str, float]:
         """
-        验证
-        
+        Validation.
+
         Args:
-            val_loader: 验证数据加载器
-        
+            val_loader: validation dataloader
+
         Returns:
-            验证指标
+            validation metrics
         """
         self.controller.eval()
         
@@ -317,10 +317,10 @@ class GRPOTrainer:
                     budget=batch['latency_budget'].to(self.device),
                 )
                 
-                # 使用确定性采样（选择最大概率的动作）
+                # Deterministic sampling (argmax actions)
                 actions = self.controller.sample_actions(logits, deterministic=True)
                 
-                # 计算reward
+                # Compute reward
                 max_crops_options = [2, 4, 6, 8, 10, 12]
                 top_k_options = [4, 8, 12, 16, 20, 24, 28, 32]
                 blocks_options = [8, 9, 10, 11, 12, 13, 14, 15, 16]
@@ -357,7 +357,7 @@ class GRPOTrainer:
         epoch: int,
         is_best: bool = False,
     ):
-        """保存checkpoint"""
+        """Save checkpoint."""
         import os
         os.makedirs(save_dir, exist_ok=True)
         
@@ -378,7 +378,7 @@ class GRPOTrainer:
         log.info(f"Saved checkpoint to {path}")
     
     def load_checkpoint(self, checkpoint_path: str):
-        """加载checkpoint"""
+        """Load checkpoint."""
         checkpoint = torch.load(checkpoint_path, map_location=self.device)
         self.controller.load_state_dict(checkpoint['controller_state_dict'])
         self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])

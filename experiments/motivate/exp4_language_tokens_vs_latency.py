@@ -26,10 +26,20 @@ log = logging.getLogger(__name__)
 class LanguageTokensVsLatencyExperiment(BaseExperiment):
     """Experiment 4: Language Tokens vs Latency Analysis."""
 
-    def run(self, dataset_name: str, split: str, num_samples: int, max_new_tokens_list: List[int]):
-        """Run Experiment 4: Language Tokens vs Latency."""
+    def run(self, dataset_name: str, split: str, num_samples: int, max_new_tokens_list: List[int], use_eos_token: bool = False):
+        """Run Experiment 4: Language Tokens vs Latency.
+        
+        Args:
+            dataset_name: Name of the dataset.
+            split: Dataset split (train/validation/test).
+            num_samples: Number of samples to use.
+            max_new_tokens_list: List of max_new_tokens values to test.
+            use_eos_token: If True, enable early stopping on EOS token.
+                          If False, force generation of exactly max_new_tokens tokens.
+        """
         with Timer("Exp 4: Language Tokens vs Latency"):
             log.info("Starting Exp 4: Language Tokens vs Latency...")
+            log.info(f"  use_eos_token={use_eos_token} (early stopping: {'enabled' if use_eos_token else 'disabled'})")
 
             dataloader = self.build_dataloader(
                 dataset_name, split, batch_size=1, max_steps=num_samples
@@ -77,13 +87,51 @@ class LanguageTokensVsLatencyExperiment(BaseExperiment):
                             position=1,
                             leave=False
                         )):
-                            # Measure latency
+                            # Measure latency and get generated output
+                            # If use_eos_token=True: model will stop early when generating EOS token
+                            # If use_eos_token=False: model will generate exactly max_new_tokens tokens
                             latency_results = self.measure_inference_latency(
                                 batch,
                                 max_new_tokens=max_tokens,
                                 measure_components=True,
                                 num_runs=1,
+                                return_output=True,  # Get generated output for decoding
+                                use_eos_token=use_eos_token,  # Use parameter to control early stopping
                             )
+
+                            # Decode generated text
+                            generated_text = None
+                            generated_text_full = None
+                            generated_text_preview = None
+                            if "generated_output" in latency_results and latency_results["generated_output"] is not None:
+                                output = latency_results["generated_output"]
+                                input_ids = batch["input_ids"]
+                                input_len = input_ids.shape[1]
+                                
+                                # Extract only generated tokens (after input)
+                                if output.shape[1] > input_len:
+                                    generated_tokens = output[:, input_len:]
+                                else:
+                                    generated_tokens = output
+                                
+                                # Decode to text
+                                if generated_tokens.numel() > 0:
+                                    # Decode full generated text
+                                    generated_text_full = self.tokenizer.decode(
+                                        generated_tokens[0].cpu().tolist(),
+                                        skip_special_tokens=False
+                                    )
+                                    
+                                    # Also decode with skip_special_tokens=True for cleaner text
+                                    generated_text = self.tokenizer.decode(
+                                        generated_tokens[0].cpu().tolist(),
+                                        skip_special_tokens=True
+                                    )
+                                    
+                                    # Extract first meaningful part (before potential repetition)
+                                    # For VQA, the answer is usually at the beginning
+                                    # We'll save both full and first 200 chars for readability
+                                    generated_text_preview = generated_text[:200] if len(generated_text) > 200 else generated_text
 
                             # FLOPs
                             flops = self.count_flops(batch, output_length=max_tokens)
@@ -108,22 +156,30 @@ class LanguageTokensVsLatencyExperiment(BaseExperiment):
                                 "T_LLM_prefill": latency_results.get("T_LLM_prefill", 0.0),
                                 "T_LLM_decode": latency_results.get("T_LLM_decode", 0.0),
                                 "T_total": latency_results.get("T_total", 0.0),
+                                "generated_text": generated_text,  # Clean decoded text (skip special tokens)
+                                "generated_text_full": generated_text_full,  # Full decoded text (with special tokens)
+                                "generated_text_preview": generated_text_preview,  # First 200 chars for readability
                                 **flops,
                                 **metadata,  # image_id, example_id, answers, image_size
                                 "T_system_total": None,  # Not measured in Exp 4
                             }
+                            # Remove generated_output from results (it's a tensor, not JSON serializable)
+                            if "generated_output" in latency_results:
+                                del latency_results["generated_output"]
                             results.append(res)
                             # Update outer progress bar
                             outer_pbar.update(1)
             
             # Analyze and Plot
             log.info("Generating plots and saving results...")
-            self.plot_language_tokens_vs_latency(results, dataset_name, split)
-            self.save_results({"results": results}, "exp4_language_tokens_vs_latency.json")
+            suffix = "_with_eos" if use_eos_token else "_no_eos"
+            self.plot_language_tokens_vs_latency(results, dataset_name, split, suffix=suffix)
+            self.save_results({"results": results, "use_eos_token": use_eos_token}, f"exp4_language_tokens_vs_latency{suffix}.json")
             log.info(f"Exp 4 completed! Total measurements: {len(results)}")
+            log.info(f"  Results saved with suffix: {suffix}")
             return results
 
-    def plot_language_tokens_vs_latency(self, results: List[Dict], dataset_name: str, split: str):
+    def plot_language_tokens_vs_latency(self, results: List[Dict], dataset_name: str, split: str, suffix: str = ""):
         """Plot language tokens vs latency."""
         fig_dir = self.output_dir / "figures"
         fig_dir.mkdir(parents=True, exist_ok=True)
@@ -228,8 +284,9 @@ class LanguageTokensVsLatencyExperiment(BaseExperiment):
         plt.grid(True, axis="y", alpha=0.3)
 
         plt.tight_layout()
-        plt.savefig(fig_dir / f"exp4_language_tokens_vs_latency_breakdown_{dataset_name}_{split}.png", dpi=300, bbox_inches="tight")
-        log.info(f"Plot saved to {fig_dir / f'exp4_language_tokens_vs_latency_breakdown_{dataset_name}_{split}.png'}")
+        plot_filename = f"exp4_language_tokens_vs_latency_breakdown_{dataset_name}_{split}{suffix}.png"
+        plt.savefig(fig_dir / plot_filename, dpi=300, bbox_inches="tight")
+        log.info(f"Plot saved to {fig_dir / plot_filename}")
         plt.close()
 
         # Print Statistics
@@ -256,6 +313,11 @@ def main():
         default=[8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096],
         help="List of max_new_tokens to test",
     )
+    parser.add_argument(
+        "--use_eos_token",
+        action="store_true",
+        help="Enable early stopping on EOS token. If not set, model will generate exactly max_new_tokens tokens.",
+    )
 
     args = parser.parse_args()
 
@@ -266,7 +328,7 @@ def main():
         hf_cache_dir=args.hf_cache_dir,
     )
 
-    experiment.run(args.dataset, args.split, args.num_samples, args.max_new_tokens_list)
+    experiment.run(args.dataset, args.split, args.num_samples, args.max_new_tokens_list, use_eos_token=args.use_eos_token)
 
 
 if __name__ == "__main__":

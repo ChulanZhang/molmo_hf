@@ -1,5 +1,5 @@
 """
-测试配置系统
+Tests for the config system.
 """
 import pytest
 import sys
@@ -10,20 +10,20 @@ sys.path.insert(0, str(project_root))
 
 
 class TestConfigSystem:
-    """测试配置系统"""
+    """Validate the config system."""
     
     def test_model_config_import(self):
-        """测试 ModelConfig 的导入"""
+        """Import ModelConfig."""
         from molmo.config import ModelConfig
         assert ModelConfig is not None
     
     def test_train_config_import(self):
-        """测试 TrainConfig 的导入"""
+        """Import TrainConfig."""
         from molmo.config import TrainConfig
         assert TrainConfig is not None
     
     def test_config_bridge_functions(self):
-        """测试配置桥接函数"""
+        """Import config bridge helpers."""
         from molmo.config import (
             model_config_to_molmo_config,
             molmo_config_to_model_config,
@@ -35,7 +35,7 @@ class TestConfigSystem:
         assert callable(load_model_config_from_hf_config)
     
     def test_model_config_creation(self):
-        """测试 ModelConfig 的创建"""
+        """Create a ModelConfig."""
         from molmo.config import ModelConfig
         
         config = ModelConfig(
@@ -51,11 +51,11 @@ class TestConfigSystem:
         assert config.n_layers == 2
     
     def test_config_conversion(self):
-        """测试配置转换功能"""
+        """Convert configs."""
         from molmo.config import ModelConfig, model_config_to_molmo_config
         from molmo.models.config_molmoe import MolmoConfig
         
-        # 创建 ModelConfig
+        # Create ModelConfig
         model_cfg = ModelConfig(
             d_model=128,
             n_heads=2,
@@ -64,13 +64,13 @@ class TestConfigSystem:
             vocab_size=1000,
         )
         
-        # 转换为 MolmoConfig
+        # Convert to MolmoConfig
         molmo_cfg = model_config_to_molmo_config(model_cfg)
         assert isinstance(molmo_cfg, MolmoConfig)
         assert molmo_cfg.d_model == 128
     
     def test_molmo_config_import(self):
-        """测试 MolmoConfig 的导入"""
+        """Import MolmoConfig."""
         from molmo.models.config_molmoe import MolmoConfig
         assert MolmoConfig is not None
         

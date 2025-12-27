@@ -297,7 +297,7 @@ class Exp6LatencyExperiment(BaseExperiment):
             max_new_tokens: Maximum tokens to generate
             num_samples: Number of samples to measure (default: None = use all samples)
             max_crops_list: List of max_crops values (default: [2, 4, 6, 8, 10], max 10)
-            top_k_list: List of top_k values (default: [4, 8, 12], 3挡位, max 12)
+            top_k_list: List of top_k values (default: [4, 8, 12], 3 positions, max 12)
             num_active_blocks_list: List of num_active_blocks values (default: [12, 13, 14, 15, 16], min 12, max 16)
             sampling_strategy: Sparse sampling strategy (default: "balanced")
         """
@@ -305,7 +305,7 @@ class Exp6LatencyExperiment(BaseExperiment):
         if max_crops_list is None:
             max_crops_list = [2, 4, 6, 8, 10]  # Max 10
         if top_k_list is None:
-            top_k_list = [4, 8, 12]  # 3挡位，最大值12
+            top_k_list = [4, 8, 12]  # three options, max 12
         if num_active_blocks_list is None:
             total_blocks = len(self.model.model.transformer.blocks)
             # Minimum 12, maximum 16 layers (based on exp3 sensitivity results)
@@ -1012,7 +1012,7 @@ def main():
     parser.add_argument("--max_crops", type=int, nargs="+", default=None,
                        help="List of max_crops values (default: [2, 4, 6, 8, 10], max 10)")
     parser.add_argument("--top_k", type=int, nargs="+", default=None,
-                       help="List of top_k values (default: [4, 8, 12], 3挡位, max 12)")
+                       help="List of top_k values (default: [4, 8, 12], three options, max 12)")
     parser.add_argument("--num_active_blocks", type=int, nargs="+", default=None,
                        help="List of num_active_blocks values (default: [12, 13, 14, 15, 16], min 12, max 16)")
     parser.add_argument("--sampling_strategy", type=str, default="balanced",

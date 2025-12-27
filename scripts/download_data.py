@@ -7,7 +7,7 @@ import shutil
 
 from molmo.data.academic_datasets import ChartQa, ScienceQAImageOnly, TextVqa, OkVqa, DocQa, \
     InfoQa, AOkVqa, Vqa2, PlotQa, FigureQa, DvQa, SceneTextQa, TabWMPDirectAnswer, \
-    AndroidControl, TallyQa, AI2D, CountBenchQa, RealWorldQa, MathVista, MMMU, ClockBench
+    AndroidControl, TallyQa, AI2D, CountBenchQa, RealWorldQa, MathVista, MMMU, ClockBench, CocoCaption
 from molmo.data.pixmo_datasets import (
     PixMoPointsEval, PixMoDocs, PixMoCount, PixMoPoints,
     PixMoCapQa, PixMoCap, PixMoPointExplanations, PixMoAskModelAnything
@@ -23,7 +23,7 @@ ACADEMIC_DATASETS = [
     ChartQa, ScienceQAImageOnly, TextVqa, OkVqa, DocQa,
     InfoQa, AOkVqa, PlotQa, FigureQa, DvQa, SceneTextQa, TabWMPDirectAnswer,
     TallyQa, AI2D, CountBenchQa, RealWorldQa, MathVista, MMMU,
-    Vqa2, AndroidControl
+    Vqa2, AndroidControl, CocoCaption
 ]
 
 PIXMO_DATASETS = [

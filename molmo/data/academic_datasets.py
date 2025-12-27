@@ -20,6 +20,7 @@ from molmo.hf_datasets.plot_qa import PlotQaBuilder
 from molmo.hf_datasets.tabmwp import TabMwpBuilder
 from molmo.hf_datasets.tally_qa import TallyQaBuilder
 from molmo.hf_datasets.vqa_v2 import VQAv2BuilderMultiQA
+from molmo.hf_datasets.coco_caption import CocoCaptionBuilder
 
 if DATA_HOME is not None:
     DOWNLOADS = join(DATA_HOME, "downloads")
@@ -201,6 +202,111 @@ class Vqa2(Dataset):
                 image=ex["image"],
                 question=ex["question"],
             )            
+
+
+class CocoCaption(Dataset):
+    """
+    COCO Caption dataset for image captioning task.
+    
+    This dataset loads COCO 2014 images with their captions. Each image has multiple
+    reference captions (typically 5) for evaluation.
+    
+    Args:
+        split: Dataset split to load. One of "train", "validation", or "test".
+               Note: COCO Caption only has train and validation splits.
+    """
+    
+    @classmethod
+    def download(cls, n_procs=1):
+        """Download COCO Caption dataset."""
+        import os
+        import fsspec
+        from fsspec.implementations.http import HTTPFileSystem
+        from aiohttp import ClientTimeout
+        
+        # Set longer timeout for fsspec/aiohttp downloads (similar to Vqa2)
+        original_timeout = os.environ.get("FSSPEC_TIMEOUT")
+        original_default_timeout = getattr(HTTPFileSystem, '_default_timeout', None)
+        logging.info(f"CocoCaption.download called. DOWNLOADS path: {DOWNLOADS}")
+        original_client_kwargs = getattr(HTTPFileSystem, 'client_kwargs', {})
+        
+        try:
+            # Set environment variable
+            os.environ["FSSPEC_TIMEOUT"] = "3600"
+            
+            # Patch HTTPFileSystem to use longer timeout
+            HTTPFileSystem._default_timeout = 3600
+            
+            # Patch client_kwargs
+            if not hasattr(HTTPFileSystem, 'client_kwargs') or HTTPFileSystem.client_kwargs is None:
+                HTTPFileSystem.client_kwargs = {}
+            HTTPFileSystem.client_kwargs = HTTPFileSystem.client_kwargs.copy()
+            HTTPFileSystem.client_kwargs['timeout'] = ClientTimeout(total=3600, connect=60)
+            
+            # Create DownloadConfig with retry mechanism
+            download_config = datasets.DownloadConfig(
+                num_proc=n_procs,
+                max_retries=5,
+            )
+            
+            try:
+                logging.info(f"Instantiating CocoCaptionBuilder with source: {DOWNLOADS}")
+                builder = CocoCaptionBuilder(DOWNLOADS)
+                logging.info(f"Calling download_and_prepare...")
+                builder.download_and_prepare(download_config=download_config)
+                logging.info(f"download_and_prepare completed.")
+            except Exception as e:
+                error_msg = str(e)
+                if "CRC" in error_msg or "Bad CRC" in error_msg:
+                    logging.warning(
+                        f"CRC error detected. This usually means the downloaded file is corrupted. "
+                        f"Try cleaning the cache and retrying:\n"
+                        f"  rm -rf ~/.cache/huggingface/datasets/*coco*\n"
+                        f"  rm -rf {DOWNLOADS}/*train2014*.zip {DOWNLOADS}/*val2014*.zip\n"
+                        f"Then run the download again."
+                    )
+                raise
+        finally:
+            # Restore original timeout settings
+            if original_timeout is not None:
+                os.environ["FSSPEC_TIMEOUT"] = original_timeout
+            elif "FSSPEC_TIMEOUT" in os.environ:
+                del os.environ["FSSPEC_TIMEOUT"]
+            
+            if original_default_timeout is not None:
+                HTTPFileSystem._default_timeout = original_default_timeout
+            elif hasattr(HTTPFileSystem, '_default_timeout'):
+                delattr(HTTPFileSystem, '_default_timeout')
+            
+            if original_client_kwargs:
+                HTTPFileSystem.client_kwargs = original_client_kwargs
+            elif hasattr(HTTPFileSystem, 'client_kwargs'):
+                HTTPFileSystem.client_kwargs = {}
+
+    def __init__(self, split):
+        assert split in ["train", "validation", "test"]
+        # COCO Caption only has train and validation splits
+        if split == "test":
+            logging.warning("COCO Caption doesn't have a test split, using validation instead")
+            split = "validation"
+        
+        self.dataset = CocoCaptionBuilder(DOWNLOADS).as_dataset(split=split)
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def get(self, item, rng):
+        """Get a single example from the dataset."""
+        ex = self.dataset[item]
+        return dict(
+            style="coco_captioning",  # Matches the style in data_formatter.py
+            image=ex["image"],
+            captions=ex["captions"],  # List of reference captions
+            metadata=dict(
+                image_id=ex["image_id"],
+                caption_id=ex["caption_id"],
+            ),
+        )
 
 
 class AOkVqa(Dataset):

@@ -1,5 +1,5 @@
 """
-集成测试：测试多个模块的协同工作
+Integration tests: verify modules work together.
 """
 import pytest
 import sys
@@ -10,16 +10,16 @@ sys.path.insert(0, str(project_root))
 
 
 class TestIntegration:
-    """集成测试"""
+    """Integration tests."""
     
     def test_config_to_model_flow(self):
-        """测试配置到模型的流程"""
+        """Config → model flow."""
         from molmo.config import ModelConfig
         from molmo.config import model_config_to_molmo_config
         from molmo.models.config_molmoe import MolmoConfig
         from molmo.models.modeling_molmoe import MolmoModel
         
-        # 创建训练配置
+        # Build a training config
         model_cfg = ModelConfig(
             d_model=128,
             n_heads=2,
@@ -28,18 +28,18 @@ class TestIntegration:
             vocab_size=1000,
         )
         
-        # 转换为 HF 配置
+        # Convert to HF config
         molmo_cfg = model_config_to_molmo_config(model_cfg)
         assert isinstance(molmo_cfg, MolmoConfig)
         
-        # 可以用于创建模型（如果 CUDA 可用）
+        # Could be used to create a model (when CUDA is available)
         # model = MolmoModel(molmo_cfg)
     
     def test_model_training_methods_availability(self):
-        """测试模型训练方法的可用性"""
+        """Check training helpers exist."""
         from molmo.models.modeling_molmoe import MolmoModel
         
-        # 检查所有训练所需的方法
+        # Required training methods
         required_methods = [
             'get_connector_parameters',
             'get_vit_parameters',
@@ -54,16 +54,16 @@ class TestIntegration:
             assert hasattr(MolmoModel, method_name), f"Missing method: {method_name}"
     
     def test_data_to_train_flow(self):
-        """测试数据到训练的流程（概念验证）"""
+        """Data → training flow (smoke)."""
         from molmo.data import get_dataset_by_name
         from molmo.train import Trainer
         
-        # 检查数据集和训练器是否可以一起使用
+        # Ensure dataset getter and trainer exist
         assert get_dataset_by_name is not None
         assert Trainer is not None
     
     def test_eval_imports_complete(self):
-        """测试评估模块的完整导入"""
+        """Eval modules import cleanly."""
         from molmo.eval import (
             build_loss_evaluators,
             build_inf_evaluators,

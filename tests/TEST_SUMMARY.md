@@ -1,222 +1,222 @@
-# 测试套件总结
+# Test Suite Summary
 
-## 测试文件列表
+## Test files
 
-### 功能测试文件（新增）
+### Functional tests (added)
 
-除了导入测试，我们还添加了实际的功能测试：
+Beyond import-only checks, we include real functional tests:
 
-### 10. `test_model_functional.py` - 模型功能测试 ✅
-测试模型的实际功能，不仅仅是导入。
+### 10. `test_model_functional.py` - Model functional tests ✅
+Exercises real model behavior, not just imports.
 
-**测试项**:
-- ✅ CPU 前向传播
-- ✅ 参数计数
-- ✅ 训练模式
-- ✅ 评估模式
-- ✅ 梯度流
-- ✅ 参数分组
-- ✅ 状态字典
+**Covers**:
+- ✅ CPU forward pass
+- ✅ Parameter counting
+- ✅ Training mode
+- ✅ Eval mode
+- ✅ Gradient flow
+- ✅ Parameter groups
+- ✅ State dict
 
-### 11. `test_data_functional.py` - 数据功能测试 ✅
-测试数据加载和预处理的实际功能。
+### 11. `test_data_functional.py` - Data functional tests ✅
+Validates data loading and preprocessing.
 
-**测试项**:
-- ✅ Collator 批处理
-- ✅ 数据格式化
-- ✅ 预处理器创建
-- ✅ 数据集混合器
-- ✅ HF 数据集构建器
+**Covers**:
+- ✅ Collator batching
+- ✅ Data formatting
+- ✅ Preprocessor creation
+- ✅ Dataset mixer
+- ✅ HF dataset builder
 
-### 12. `test_config_functional.py` - 配置功能测试 ✅
-测试配置系统的实际使用。
+### 12. `test_config_functional.py` - Config functional tests ✅
+Validates practical config usage.
 
-**测试项**:
-- ✅ ModelConfig 到 MolmoConfig 转换
-- ✅ MolmoConfig 到 ModelConfig 转换
-- ✅ 配置双向转换
-- ✅ 配置序列化
+**Covers**:
+- ✅ ModelConfig → MolmoConfig conversion
+- ✅ MolmoConfig → ModelConfig conversion
+- ✅ Bidirectional conversion
+- ✅ Config serialization
 
-### 13. `test_train_functional.py` - 训练功能测试 ✅
-测试训练相关的实际功能。
+### 13. `test_train_functional.py` - Training functional tests ✅
+Validates training-related behaviors.
 
-**测试项**:
-- ✅ 优化器创建
-- ✅ 调度器创建
-- ✅ 检查点保存/加载
-- ✅ 训练步骤模拟
+**Covers**:
+- ✅ Optimizer creation
+- ✅ Scheduler creation
+- ✅ Checkpoint save/load
+- ✅ Training step simulation
 
-### 14. `test_tokenizer_functional.py` - 分词器功能测试 ✅
-测试分词器的实际功能。
+### 14. `test_tokenizer_functional.py` - Tokenizer functional tests ✅
+Validates tokenizer behaviors.
 
-**测试项**:
-- ✅ 分词器包装器创建
-- ✅ 特殊 token 处理
-- ✅ 构建分词器函数
+**Covers**:
+- ✅ Tokenizer wrapper creation
+- ✅ Special-token handling
+- ✅ Tokenizer builder
 
-### 15. `test_end_to_end.py` - 端到端测试 ✅
-测试完整的工作流程。
+### 15. `test_end_to_end.py` - End-to-end tests ✅
+Validates the full workflow.
 
-**测试项**:
-- ✅ 配置到模型到前向传播
-- ✅ 完整训练工作流程
-- ✅ 模型状态管理
-- ✅ 配置转换工作流程
+**Covers**:
+- ✅ Config → model → forward
+- ✅ Full training workflow
+- ✅ Model state management
+- ✅ Config conversion workflow
 
-## 原有测试文件列表
+## Legacy test files
 
-### 1. `test_imports.py` - 导入测试 ✅
-测试所有核心模块的导入功能，确保没有循环导入问题。
+### 1. `test_imports.py` - Import tests ✅
+Ensures core modules import cleanly without cycles.
 
-**测试项**:
-- ✅ 包导入
-- ✅ 模型类导入
-- ✅ 配置系统导入
-- ✅ 数据集模块导入
-- ✅ 训练模块导入
-- ✅ 评估模块导入
-- ✅ 工具模块导入
-- ✅ HF 数据集导入
-- ✅ HTML 工具导入
+**Covers**:
+- ✅ Package imports
+- ✅ Model class imports
+- ✅ Config system imports
+- ✅ Dataset module imports
+- ✅ Training module imports
+- ✅ Eval module imports
+- ✅ Utility imports
+- ✅ HF dataset imports
+- ✅ HTML utility imports
 
-### 2. `test_models.py` - 模型测试 ✅
-测试模型相关的功能。
+### 2. `test_models.py` - Model tests ✅
+Exercises model-related functionality.
 
-**测试项**:
-- ✅ 模型类导入
-- ✅ 模型配置创建
-- ✅ 训练方法可用性
-- ✅ 静态方法调用
-- ⚠️ 模型初始化（需要完整配置）
-- ⚠️ 参数计数（需要完整配置）
+**Covers**:
+- ✅ Model class import
+- ✅ Model config creation
+- ✅ Training method availability
+- ✅ Static method calls
+- ⚠️ Model initialization (needs full config)
+- ⚠️ Parameter counting (needs full config)
 
-### 3. `test_config.py` - 配置系统测试 ✅
-测试配置系统和配置转换功能。
+### 3. `test_config.py` - Config system tests ✅
+Validates config system and conversions.
 
-**测试项**:
-- ✅ 配置类导入
-- ✅ 配置创建
-- ✅ 配置转换功能
+**Covers**:
+- ✅ Config class imports
+- ✅ Config creation
+- ✅ Config conversion
 
-### 4. `test_data.py` - 数据集模块测试 ✅
-测试数据集相关功能。
+### 4. `test_data.py` - Dataset module tests ✅
+Validates dataset-related functionality.
 
-**测试项**:
-- ✅ 数据集基类导入
-- ✅ Collator 导入
-- ✅ 数据格式化器导入
-- ✅ 预处理器导入
-- ✅ 数据集混合器导入
-- ✅ 数据集获取功能
-- ✅ HF 数据集构建器
+**Covers**:
+- ✅ Dataset base import
+- ✅ Collator import
+- ✅ Data formatter import
+- ✅ Preprocessor import
+- ✅ Dataset mixer import
+- ✅ Dataset fetch
+- ✅ HF dataset builder
 
-### 5. `test_train.py` - 训练模块测试 ✅
-测试训练相关功能。
+### 5. `test_train.py` - Training module tests ✅
+Validates training utilities.
 
-**测试项**:
-- ✅ Trainer 类导入
-- ✅ 优化器导入
-- ✅ 检查点模块导入
-- ✅ Trainer 类结构
-- ✅ 优化器类型
-- ✅ 调度器类型
+**Covers**:
+- ✅ Trainer import
+- ✅ Optimizer import
+- ✅ Checkpoint module import
+- ✅ Trainer structure
+- ✅ Optimizer types
+- ✅ Scheduler types
 
-### 6. `test_eval.py` - 评估模块测试 ✅
-测试评估相关功能。
+### 6. `test_eval.py` - Evaluation module tests ✅
+Validates evaluation utilities.
 
-**测试项**:
-- ✅ 评估器基类
-- ✅ 推理评估器
-- ✅ 损失评估器
-- ✅ VQA 评估
-- ✅ 评估器构建函数
+**Covers**:
+- ✅ Evaluator base
+- ✅ Inference evaluator
+- ✅ Loss evaluator
+- ✅ VQA evaluation
+- ✅ Evaluator builder
 
-### 7. `test_utils.py` - 工具模块测试 ✅
-测试工具函数。
+### 7. `test_utils.py` - Utility tests ✅
+Validates helper functions.
 
-**测试项**:
-- ✅ PyTorch 工具函数
-- ✅ 分词器工具
-- ✅ 通用工具函数
-- ✅ 异常类
-- ✅ 类型别名
-- ✅ Safetensors 工具
-- ✅ HTML 工具
+**Covers**:
+- ✅ PyTorch utilities
+- ✅ Tokenizer utilities
+- ✅ General utilities
+- ✅ Exception classes
+- ✅ Type aliases
+- ✅ Safetensors utilities
+- ✅ HTML utilities
 
-### 8. `test_integration.py` - 集成测试 ✅
-测试多个模块的协同工作。
+### 8. `test_integration.py` - Integration tests ✅
+Validates cross-module workflows.
 
-**测试项**:
-- ✅ 配置到模型流程
-- ✅ 模型训练方法完整性
-- ✅ 数据到训练流程
-- ✅ 评估模块完整导入
+**Covers**:
+- ✅ Config → model flow
+- ✅ Model training method completeness
+- ✅ Data → training flow
+- ✅ Eval module imports
 
-### 9. `test_gpu.py` - GPU 测试 ✅
-测试模型在 GPU 上的功能（使用第 4 张 GPU）。
+### 9. `test_gpu.py` - GPU tests ✅
+Validates GPU behavior (uses the 4th GPU).
 
-**测试项**:
-- ✅ GPU 可用性检查
-- ⚠️ 模型创建（需要完整配置）
-- ⚠️ 前向传播（需要完整配置）
-- ✅ 训练方法在 GPU 上
-- ✅ 内存使用测试
+**Covers**:
+- ✅ GPU availability check
+- ⚠️ Model creation (needs full config)
+- ⚠️ Forward pass (needs full config)
+- ✅ Training methods on GPU
+- ✅ Memory usage test
 
-## 运行测试
+## Running tests
 
-### 运行所有测试
+### All tests
 ```bash
 pytest tests/
 ```
 
-### 运行 GPU 测试（使用第 4 张 GPU）
+### GPU tests (use the 4th GPU)
 ```bash
 CUDA_VISIBLE_DEVICES=3 pytest tests/test_gpu.py -v -s
 ```
 
-或者使用提供的脚本：
+Or via the helper script:
 ```bash
 ./tests/run_gpu_tests.sh
 ```
 
-### 运行特定测试类别
+### Specific categories
 ```bash
-# 只运行导入测试
+# Import tests only
 pytest tests/test_imports.py -v
 
-# 只运行模型测试
+# Model tests only
 pytest tests/test_models.py -v
 
-# 只运行配置测试
+# Config tests only
 pytest tests/test_config.py -v
 ```
 
-## 测试结果统计
+## Test results snapshot
 
-### 当前状态
-- **总测试数**: 80+（包括导入测试和功能测试）
-- **通过**: 70+
-- **需要修复**: 10+（主要是配置问题和端到端测试）
-- **通过率**: ~87%
+### Current status
+- **Total tests**: 80+ (imports + functional)
+- **Passing**: 70+
+- **Needs fixes**: 10+ (mainly config and end-to-end)
+- **Pass rate**: ~87%
 
-### 测试类型分布
-- **导入测试**: 9 个文件，50+ 测试
-- **功能测试**: 6 个文件，30+ 测试
-- **端到端测试**: 1 个文件，4 个测试
+### Distribution
+- **Import tests**: 9 files, 50+ tests
+- **Functional tests**: 6 files, 30+ tests
+- **End-to-end tests**: 1 file, 4 tests
 
-### 已知问题
+### Known issues
 
-1. **配置问题**:
-   - `n_kv_heads` 需要明确设置，不能为 None
-   - `vision_backbone` 需要明确设置为 None（如果不需要视觉功能）
+1. **Config**:
+   - `n_kv_heads` must be set (not None)
+   - `vision_backbone` must be explicitly None when vision is unused
 
-2. **评估模块**:
-   - `DatasetEvaluator` 类名可能不同，需要使用 `DatasetEvaluatorConfig`
+2. **Evaluation module**:
+   - `DatasetEvaluator` class name may differ; use `DatasetEvaluatorConfig`
 
-## 下一步
+## Next steps
 
-1. 修复配置问题，确保模型可以正常初始化
-2. 添加更多端到端测试
-3. 添加性能基准测试
-4. 添加分布式训练测试
+1. Fix config gaps to ensure model init succeeds
+2. Add more end-to-end tests
+3. Add performance benchmarks
+4. Add distributed training tests
 

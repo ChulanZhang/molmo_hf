@@ -6,7 +6,7 @@ from torch.utils.data import DataLoader, DistributedSampler
 from molmo.config import DataConfig, TrainConfig, ModelConfig
 from molmo.data.academic_datasets import ChartQa, ScienceQAImageOnly, TextVqa, OkVqa, DocQa, \
     InfoQa, AOkVqa, Vqa2, PlotQa, FigureQa, DvQa, SceneTextQa, TabWMPDirectAnswer, \
-    AndroidControl, TallyQa, AI2D, CountBenchQa, RealWorldQa, MathVista, MMMU, ClockBench
+    AndroidControl, TallyQa, AI2D, CountBenchQa, RealWorldQa, MathVista, MMMU, ClockBench, CocoCaption
 from molmo.data.collator import MMCollator
 from molmo.data.data_formatter import DataFormatter
 from molmo.data.dataset import DeterministicDataset
@@ -281,6 +281,8 @@ def get_dataset_by_name(dataset_name, split):
         return Vqa2(split, multi_question=True)
     if dataset_name == "coco_2014_vqa":
         return Vqa2(split, multi_question=False)
+    if dataset_name == "coco_caption" or dataset_name == "coco_captioning":
+        return CocoCaption(split)
     if dataset_name == "text_vqa":
         return TextVqa(split)
     if dataset_name == "plot_qa":

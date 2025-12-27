@@ -492,6 +492,9 @@ class DataFormatter:
                 # plain text for everything else
                 if style == "long_caption":
                     prompt = apply_keyword_prompt(GENERAL_PROMPTS_V1["long_caption"], example, rng, dbg=self.debug)
+                elif style == "coco_captioning":
+                    # COCO Caption: use short_caption prompts
+                    prompt = apply_keyword_prompt(GENERAL_PROMPTS_V1["short_caption"], example, rng, dbg=self.debug)
                 elif style in ["pointing", "point_count"]:
                     # output, prompt, metadata = self.format_points(example)
                     if "question" in example:
@@ -525,6 +528,19 @@ class DataFormatter:
                 output = example["answer_with_points"]
             elif "text" in example:
                 output = example["text"]
+            elif "captions" in example:
+                # For COCO Caption: select one caption from the list of reference captions
+                captions = example["captions"]
+                if isinstance(captions, list) and len(captions) > 0:
+                    # Select a random caption for training (or first one if deterministic)
+                    if rng is not None:
+                        output = captions[rng.randint(0, len(captions))]
+                    else:
+                        output = captions[0]
+                elif isinstance(captions, str):
+                    output = captions
+                else:
+                    raise ValueError(f"Invalid captions format: {captions}")
             else:
                 print(example)
                 raise ValueError("No output in example, if this is an inference-only task make sure `for_inference` is True")
@@ -533,7 +549,7 @@ class DataFormatter:
 
     def _format_example(self, message, example, is_training, for_inference, rng):
         metadata = {}
-        for k in ["answer_idx", "answers", "answer", "points", "options"]:
+        for k in ["answer_idx", "answers", "answer", "points", "options", "captions", "image_id", "caption_id"]:
             if k in message:
                 metadata[k] = message[k]
 

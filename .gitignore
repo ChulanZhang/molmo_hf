@@ -23,3 +23,6 @@ EOF
 
 # cache
 .cache
+
+# pictures
+*.png

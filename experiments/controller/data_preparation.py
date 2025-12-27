@@ -1,5 +1,5 @@
 """
-数据准备模块：从exp5和exp6结果中提取训练数据
+Data preparation: extract training data from exp5 and exp6 results.
 """
 
 import json
@@ -16,17 +16,17 @@ log = logging.getLogger(__name__)
 
 
 class ExpDataLoader:
-    """从exp5和exp6结果文件中加载数据"""
+    """Load data from exp5 and exp6 result files."""
     
     def __init__(self, exp5_dir: str, exp6_dir: str):
         self.exp5_dir = Path(exp5_dir)
         self.exp6_dir = Path(exp6_dir)
     
     def load_exp5_results(self, dataset_name: str = "text_vqa") -> List[Dict]:
-        """加载exp5的准确率结果"""
+        """Load exp5 accuracy results."""
         results = []
         
-        # 查找所有exp5结果文件
+        # Find all exp5 result files
         pattern = f"exp5_accuracy_results*.json"
         if dataset_name != "coco_2014_vqa":
             dataset_suffix = dataset_name.replace("_", "-")
@@ -46,7 +46,7 @@ class ExpDataLoader:
             with open(json_file, 'r') as f:
                 data = json.load(f)
                 
-                # 提取summary和all_samples
+                # Extract summary and all_samples
                 if 'summary' in data:
                     for summary in data['summary']:
                         results.append({
@@ -58,11 +58,10 @@ class ExpDataLoader:
                             'config': summary,
                         })
                 
-                # 提取per-sample数据
+                # Per-sample data
                 if 'all_samples' in data:
                     for sample in data['all_samples']:
-                        # 需要从文件名或summary中获取配置信息
-                        # 这里假设可以从文件名解析
+                        # Parse config from filename
                         config = self._parse_config_from_filename(json_file.name)
                         if config:
                             results.append({
@@ -79,10 +78,10 @@ class ExpDataLoader:
         return results
     
     def load_exp6_results(self, dataset_name: str = "text_vqa") -> List[Dict]:
-        """加载exp6的延迟和准确率结果"""
+        """Load exp6 latency + accuracy results."""
         results = []
         
-        # 查找所有exp6结果文件
+        # Find all exp6 result files
         pattern = f"exp6_latency*.json"
         if dataset_name != "coco_2014_vqa":
             dataset_suffix = dataset_name.replace("_", "-")
@@ -102,7 +101,7 @@ class ExpDataLoader:
             with open(json_file, 'r') as f:
                 data = json.load(f)
                 
-                # 提取summary
+                # Extract summary
                 if 'summary' in data:
                     for summary in data['summary']:
                         results.append({
@@ -119,7 +118,7 @@ class ExpDataLoader:
                             'config': summary,
                         })
                 
-                # 提取per-sample数据
+                # Per-sample data
                 if 'all_samples' in data:
                     for sample in data['all_samples']:
                         config = self._parse_config_from_filename(json_file.name)
@@ -141,9 +140,9 @@ class ExpDataLoader:
         return results
     
     def _parse_config_from_filename(self, filename: str) -> Optional[Dict]:
-        """从文件名解析配置信息
-        
-        文件名格式：exp5_accuracy_results_crops12_topk32_blocks12_rank0.json
+        """Parse config from filename.
+
+        Format example: exp5_accuracy_results_crops12_topk32_blocks12_rank0.json
         """
         try:
             parts = filename.replace('.json', '').split('_')
@@ -165,36 +164,36 @@ class ExpDataLoader:
         return None
     
     def merge_exp5_exp6(self, exp5_results: List[Dict], exp6_results: List[Dict]) -> List[Dict]:
-        """合并exp5和exp6的数据
-        
-        优先使用exp6的数据（有延迟信息），如果没有则使用exp5的数据
+        """Merge exp5 and exp6 data.
+
+        Prefer exp6 records when available (has latency); otherwise use exp5.
         """
         merged = []
         
-        # 创建exp6的查找字典（按配置和sample_id）
+        # Build lookup dict for exp6 by (sample_id, config)
         exp6_dict = {}
         for r in exp6_results:
             if 'sample_id' in r:
                 key = (r.get('sample_id'), r.get('max_crops'), r.get('top_k'), r.get('num_active_blocks'))
                 exp6_dict[key] = r
         
-        # 合并数据
+        # Merge
         for r5 in exp5_results:
             if 'sample_id' in r5:
                 key = (r5.get('sample_id'), r5.get('max_crops'), r5.get('top_k'), r5.get('num_active_blocks'))
                 if key in exp6_dict:
-                    # 使用exp6的数据（有延迟信息）
+                    # Use exp6 (has latency)
                     merged.append(exp6_dict[key])
                 else:
-                    # 使用exp5的数据，延迟设为None
+                    # Use exp5; latency None
                     r5_copy = r5.copy()
                     r5_copy['latency'] = None
                     merged.append(r5_copy)
             else:
-                # summary数据，直接添加
+                # summary rows without sample_id
                 merged.append(r5)
         
-        # 添加exp6中独有的数据
+        # Add exp6-only entries
         for r6 in exp6_results:
             if 'sample_id' in r6:
                 key = (r6.get('sample_id'), r6.get('max_crops'), r6.get('top_k'), r6.get('num_active_blocks'))
@@ -206,7 +205,7 @@ class ExpDataLoader:
 
 
 class TrainingDataBuilder:
-    """构建训练数据"""
+    """Build training data."""
     
     def __init__(
         self,
@@ -225,9 +224,9 @@ class TrainingDataBuilder:
         batch_size: int = 32,
     ) -> Dict[str, torch.Tensor]:
         """
-        从数据集中提取图像和语言特征
-        
-        返回：
+        Extract image and language features from the dataset.
+
+        Returns:
         {
             'image_features': (N, D_img),
             'language_features': (N, D_lang),
@@ -239,7 +238,7 @@ class TrainingDataBuilder:
         from molmo.data.collator import MMCollator
         from molmo.data.dataset import DeterministicDataset
         
-        # 构建dataloader
+        # Build dataloader
         mm_preprocessor = MultiModalPreprocessor(
             tokenizer=self.tokenizer,
             crop_mode=self.model.config.crop_mode,
@@ -276,7 +275,7 @@ class TrainingDataBuilder:
             pin_memory=True,
         )
         
-        # 提取特征
+        # Extract features
         image_features_list = []
         language_features_list = []
         sample_ids_list = []
@@ -287,13 +286,13 @@ class TrainingDataBuilder:
                 batch = {k: v.to(self.device, non_blocking=True) if isinstance(v, torch.Tensor) else v 
                         for k, v in batch.items()}
                 
-                # 提取图像特征
+                # Image feature
                 if batch.get('images') is not None:
                     image_features, cls_embed = self.model.model.vision_backbone(
                         batch['images'], 
                         batch.get('image_masks')
                     )
-                    # 使用CLS token或mean pooling
+                    # Use CLS token or mean pooling
                     if cls_embed is not None:
                         image_feat = cls_embed.mean(dim=1)  # (B, D)
                     else:
@@ -301,14 +300,14 @@ class TrainingDataBuilder:
                 else:
                     image_feat = torch.zeros(batch['input_ids'].shape[0], 768, device=self.device)
                 
-                # 提取语言特征
+                # Language feature
                 input_embeds = self.model.model.transformer.wte(batch['input_ids'])
                 lang_feat = input_embeds.mean(dim=1)  # (B, D)
                 
                 image_features_list.append(image_feat.cpu())
                 language_features_list.append(lang_feat.cpu())
                 
-                # 获取sample_ids
+                # Collect sample_ids
                 if 'metadata' in batch:
                     batch_sample_ids = [m.get('sample_id', batch_idx * batch_size + i) 
                                       for i, m in enumerate(batch['metadata'])]
@@ -335,44 +334,44 @@ class TrainingDataBuilder:
         latency_budgets: List[float] = None,
     ) -> List[Dict]:
         """
-        构建训练数据
-        
+        Build training data.
+
         Args:
-            merged_results: 合并后的exp5/exp6结果
-            features: 提取的特征
-            latency_budgets: 延迟预算列表（如果为None，则使用实际延迟的某个倍数）
-        
+            merged_results: merged exp5/exp6 results
+            features: extracted features
+            latency_budgets: latency budgets (if None, use multiples of actual latency)
+
         Returns:
-            训练数据列表
+            list of training records
         """
         training_data = []
         
-        # 创建sample_id到特征的映射
+        # Map sample_id to features
         sample_id_to_idx = {int(sid): idx for idx, sid in enumerate(features['sample_ids'])}
         
-        # 如果没有提供延迟预算，使用实际延迟的某个倍数
+        # If no budgets provided, use multiples of actual latency
         if latency_budgets is None:
             latencies = [r.get('latency', 0.0) for r in merged_results if r.get('latency') is not None]
             if latencies:
                 mean_latency = np.mean(latencies)
                 latency_budgets = [mean_latency * 0.8, mean_latency * 1.0, mean_latency * 1.2]
             else:
-                latency_budgets = [0.5, 1.0, 1.5]  # 默认值
+                latency_budgets = [0.5, 1.0, 1.5]  # defaults
         
         for result in merged_results:
             sample_id = result.get('sample_id')
             if sample_id is None:
                 continue
             
-            # 获取特征
+            # Get features
             if sample_id in sample_id_to_idx:
                 idx = sample_id_to_idx[sample_id]
                 image_feat = features['image_features'][idx]
                 lang_feat = features['language_features'][idx]
             else:
-                continue  # 跳过没有特征的样本
+                continue  # skip samples without features
             
-            # 为每个延迟预算创建一条训练数据
+            # Create one record per latency budget
             for budget in latency_budgets:
                 training_data.append({
                     'sample_id': sample_id,
@@ -395,8 +394,8 @@ class TrainingDataBuilder:
 
 
 def save_training_data(training_data: List[Dict], output_path: str):
-    """保存训练数据到文件"""
-    # 将tensor转换为numpy数组
+    """Save training data to file."""
+    # Convert tensor to numpy
     data_to_save = []
     for item in training_data:
         item_copy = item.copy()
@@ -411,11 +410,11 @@ def save_training_data(training_data: List[Dict], output_path: str):
 
 
 def load_training_data(input_path: str) -> List[Dict]:
-    """从文件加载训练数据"""
+    """Load training data from file."""
     with open(input_path, 'r') as f:
         data = json.load(f)
     
-    # 将numpy数组转换回tensor
+    # Convert numpy back to tensor
     training_data = []
     for item in data:
         item['image_feature'] = torch.tensor(item['image_feature'])

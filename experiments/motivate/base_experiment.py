@@ -268,6 +268,8 @@ class BaseExperiment(ABC):
         measure_components: bool = True,
         num_runs: int = 1,
         use_hook_for_llm_prefill: bool = False,
+        return_output: bool = False,
+        use_eos_token: bool = True,
     ) -> Dict[str, float]:
         """
         Measure end-to-end inference latency and component latencies.
@@ -279,9 +281,13 @@ class BaseExperiment(ABC):
             num_runs: Number of runs to average over (for stability).
             use_hook_for_llm_prefill: If True, use forward hooks to directly measure LLM prefill.
                                      If False (default), use subtraction method (T_prefill_step - T_vision_total).
+            return_output: If True, include the generated output tensor in the results.
+            use_eos_token: If True, enable early stopping when EOS token is generated.
+                          If False, model will generate exactly max_new_tokens tokens (for profiling experiments).
             
         Returns:
             Dictionary with latency measurements (ms) and token counts.
+            If return_output=True, also includes 'generated_output' key with the output tensor.
         """
         # 1. Move batch to device
         try:
@@ -486,7 +492,32 @@ class BaseExperiment(ABC):
                         torch.cuda.empty_cache()
                     
                     from transformers import GenerationConfig
-                    generation_config = GenerationConfig(max_new_tokens=max_new_tokens, use_cache=True)
+                    
+                    # Get EOS and PAD token IDs for early stopping
+                    # This allows the model to stop early when generating EOS token
+                    eos_token_id = None
+                    pad_token_id = None
+                    
+                    if use_eos_token:
+                        eos_token_id = self.tokenizer.eos_token_id
+                        if eos_token_id is None:
+                            eos_token_id = getattr(self.model.config, 'eos_token_id', None)
+                        
+                        pad_token_id = self.tokenizer.pad_token_id
+                        if pad_token_id is None:
+                            pad_token_id = getattr(self.model.config, 'pad_token_id', None)
+                    
+                    # Build generation config
+                    generation_config_kwargs = {
+                        "max_new_tokens": max_new_tokens,
+                        "use_cache": True,
+                    }
+                    if use_eos_token and eos_token_id is not None:
+                        generation_config_kwargs["eos_token_id"] = eos_token_id
+                    if pad_token_id is not None:
+                        generation_config_kwargs["pad_token_id"] = pad_token_id
+                    
+                    generation_config = GenerationConfig(**generation_config_kwargs)
                     
                     output = self.model.generate(
                         input_ids=batch["input_ids"],
@@ -547,6 +578,10 @@ class BaseExperiment(ABC):
                      results["num_output_tokens"] = int(output.shape[1])
         else:
             results["num_output_tokens"] = 0
+        
+        # Store output if requested
+        if return_output and output is not None:
+            results["generated_output"] = output
         
         # Count vision tokens (if available)
         # Use image_input_idx to count valid vision tokens

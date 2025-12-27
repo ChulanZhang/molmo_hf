@@ -1,5 +1,5 @@
 """
-配置系统功能测试：测试配置的实际使用
+Config system functional tests: validate real-world config usage.
 """
 import pytest
 import sys
@@ -10,10 +10,10 @@ sys.path.insert(0, str(project_root))
 
 
 class TestConfigFunctional:
-    """测试配置系统的实际功能"""
+    """Validate config system functionality."""
     
     def test_model_config_to_molmo_config(self):
-        """测试 ModelConfig 到 MolmoConfig 的转换"""
+        """Convert ModelConfig to MolmoConfig."""
         from molmo.config import ModelConfig, model_config_to_molmo_config
         
         model_cfg = ModelConfig(
@@ -32,7 +32,7 @@ class TestConfigFunctional:
         print("✓ ModelConfig to MolmoConfig conversion works")
     
     def test_molmo_config_to_model_config(self):
-        """测试 MolmoConfig 到 ModelConfig 的转换"""
+        """Convert MolmoConfig to ModelConfig."""
         from molmo.models.config_molmoe import MolmoConfig
         from molmo.config import molmo_config_to_model_config
         
@@ -52,7 +52,7 @@ class TestConfigFunctional:
         print("✓ MolmoConfig to ModelConfig conversion works")
     
     def test_config_round_trip(self):
-        """测试配置的双向转换"""
+        """Round-trip conversion."""
         from molmo.config import ModelConfig, model_config_to_molmo_config, molmo_config_to_model_config
         
         original = ModelConfig(
@@ -73,7 +73,7 @@ class TestConfigFunctional:
         print("✓ Config round-trip conversion works")
     
     def test_config_serialization(self):
-        """测试配置的序列化"""
+        """Serialize and restore config."""
         from molmo.models.config_molmoe import MolmoConfig
         
         config = MolmoConfig(
@@ -83,12 +83,12 @@ class TestConfigFunctional:
             vocab_size=1000,
         )
         
-        # 测试配置可以转换为字典
+        # Config to dict
         config_dict = config.to_dict()
         assert isinstance(config_dict, dict)
         assert "d_model" in config_dict
         
-        # 测试从字典创建配置
+        # Dict back to config
         new_config = MolmoConfig.from_dict(config_dict)
         assert new_config.d_model == config.d_model
         

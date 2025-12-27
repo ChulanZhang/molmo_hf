@@ -1,5 +1,5 @@
 """
-模型功能测试：测试模型的实际功能，不仅仅是导入
+Model functional tests: validate real model behaviors beyond imports.
 """
 import pytest
 import torch
@@ -11,11 +11,11 @@ sys.path.insert(0, str(project_root))
 
 
 class TestModelFunctional:
-    """测试模型的实际功能"""
+    """Validate model functionality."""
     
     @pytest.fixture
     def sample_config(self):
-        """创建示例配置"""
+        """Create a sample config."""
         from molmo.models.config_molmoe import MolmoConfig
         
         return MolmoConfig(
@@ -31,7 +31,7 @@ class TestModelFunctional:
         )
     
     def test_model_forward_pass_cpu(self, sample_config):
-        """测试模型在 CPU 上的前向传播"""
+        """Run a forward pass on CPU."""
         from molmo.models.modeling_molmoe import MolmoModel
         
         model = MolmoModel(sample_config)
@@ -49,23 +49,23 @@ class TestModelFunctional:
         print(f"✓ Forward pass successful: {outputs.last_hidden_states.shape}")
     
     def test_model_parameter_count(self, sample_config):
-        """测试模型参数计数"""
+        """Count model parameters."""
         from molmo.models.modeling_molmoe import MolmoModel
         
         model = MolmoModel(sample_config)
         
-        # 测试参数计数
+        # Validate parameter count
         num_params = model.num_params()
         assert num_params > 0
         
-        # 手动计算参数数量验证
+        # Manually compute parameter count for verification
         manual_count = sum(p.numel() for p in model.parameters())
         assert num_params == manual_count
         
         print(f"✓ Model has {num_params:,} parameters")
     
     def test_model_training_mode(self, sample_config):
-        """测试模型训练模式"""
+        """Check training mode."""
         from molmo.models.modeling_molmoe import MolmoModel
         
         model = MolmoModel(sample_config)
@@ -73,7 +73,7 @@ class TestModelFunctional:
         
         assert model.training == True
         
-        # 测试前向传播（训练模式）
+        # Forward pass in training mode
         batch_size = 2
         seq_len = 10
         input_ids = torch.randint(0, sample_config.vocab_size, (batch_size, seq_len))
@@ -84,7 +84,7 @@ class TestModelFunctional:
         print("✓ Model training mode works")
     
     def test_model_eval_mode(self, sample_config):
-        """测试模型评估模式"""
+        """Check eval mode."""
         from molmo.models.modeling_molmoe import MolmoModel
         
         model = MolmoModel(sample_config)
@@ -103,7 +103,7 @@ class TestModelFunctional:
         print("✓ Model eval mode works")
     
     def test_model_gradient_flow(self, sample_config):
-        """测试模型梯度流"""
+        """Verify gradients flow."""
         from molmo.models.modeling_molmoe import MolmoModel
         
         model = MolmoModel(sample_config)
@@ -115,23 +115,23 @@ class TestModelFunctional:
         
         outputs = model(input_ids=input_ids)
         
-        # 创建虚拟损失
+        # Create dummy loss
         loss = outputs.last_hidden_states.mean()
         loss.backward()
         
-        # 检查梯度是否存在
+        # Ensure gradients exist
         has_grad = any(p.grad is not None for p in model.parameters() if p.requires_grad)
         assert has_grad
         
         print("✓ Gradient flow works")
     
     def test_model_parameter_groups(self, sample_config):
-        """测试模型参数分组"""
+        """Inspect parameter groups."""
         from molmo.models.modeling_molmoe import MolmoModel
         
         model = MolmoModel(sample_config)
         
-        # 测试静态方法
+        # Static accessors
         connector_params = MolmoModel.get_connector_parameters()
         vit_params = MolmoModel.get_vit_parameters()
         llm_params = MolmoModel.get_llm_parameters()
@@ -143,7 +143,7 @@ class TestModelFunctional:
         print(f"✓ Parameter groups: connector={len(connector_params)}, vit={len(vit_params)}, llm={len(llm_params)}")
     
     def test_model_state_dict(self, sample_config):
-        """测试模型状态字典"""
+        """Check state dict round-trip."""
         from molmo.models.modeling_molmoe import MolmoModel
         
         model = MolmoModel(sample_config)
@@ -152,7 +152,7 @@ class TestModelFunctional:
         assert isinstance(state_dict, dict)
         assert len(state_dict) > 0
         
-        # 测试加载状态字典
+        # Load state dict into a new model
         model2 = MolmoModel(sample_config)
         model2.load_state_dict(state_dict)
         

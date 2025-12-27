@@ -199,8 +199,52 @@ def dino_resize_and_pad(
     return resized, image_mask
 
 
-def select_tiling(h, w, patch_size, max_num_crops):
-    """Divide in image of size [w, h] in up to max_num_patches of size patch_size"""
+def select_tiling(h, w, patch_size, max_num_crops, exact_num_crops=None):
+    """
+    Divide in image of size [w, h] in up to max_num_patches of size patch_size.
+    
+    Args:
+        h: Image height (after subtracting margins)
+        w: Image width (after subtracting margins)
+        patch_size: Crop window size (e.g., 224)
+        max_num_crops: Maximum number of crops allowed
+        exact_num_crops: If provided, force selection of exactly this many crops.
+                        If None, uses adaptive selection based on image size.
+    
+    Returns:
+        (rows, cols) tiling configuration
+    """
+    # If exact_num_crops is specified, force selection of that many crops
+    if exact_num_crops is not None:
+        # Find all tilings that result in exactly exact_num_crops
+        exact_tilings = []
+        for i in range(1, exact_num_crops + 1):
+            if exact_num_crops % i == 0:
+                j = exact_num_crops // i
+                exact_tilings.append((i, j))
+        
+        if not exact_tilings:
+            # Fallback: use (1, exact_num_crops) if no exact match
+            return (1, exact_num_crops)
+        
+        # Among exact tilings, select the one closest to image aspect ratio
+        original_size = np.stack([h, w], dtype=np.float32)
+        aspect_ratio = w / h if h > 0 else 1.0
+        
+        best_tiling = None
+        best_match = float('inf')
+        
+        for i, j in exact_tilings:
+            tiling_resolution = np.array([i * patch_size, j * patch_size], dtype=np.float32)
+            tiling_aspect = tiling_resolution[1] / tiling_resolution[0] if tiling_resolution[0] > 0 else 1.0
+            aspect_diff = abs(tiling_aspect - aspect_ratio)
+            if aspect_diff < best_match:
+                best_match = aspect_diff
+                best_tiling = (i, j)
+        
+        return best_tiling if best_tiling else exact_tilings[0]
+    
+    # Original adaptive selection logic
     original_size = np.stack([h, w])  # [1, 2]
     original_res = h * w
     tilings = []
@@ -285,6 +329,7 @@ class MultiModalPreprocessor:
     crop_mode: str = "resize"
     # max_crops: int = 6
     max_crops: int = 12
+    exact_num_crops: Optional[int] = None  # If set, force selection of exactly this many crops
     overlap_margins: Tuple[int, int] = (4, 4)
     resize: str = "default"
     use_col_tokens: bool = True
@@ -297,6 +342,9 @@ class MultiModalPreprocessor:
     image_token_length_h: int = 12
     image_patch_size: int = 14
     image_padding_mask: Union[bool, int] = False
+    # If True, keep padded patches as valid tokens (no -100), so vision token
+    # count matches theoretical (num_crops+1)*144 even with overlap.
+    force_full_tokens: bool = False
     pad_value: float = 0
 
     image_patch_token_id: int = dataclasses.field(init=False)
@@ -400,7 +448,8 @@ class MultiModalPreprocessor:
                 original_image_h - total_margin_pixels,
                 original_image_w - total_margin_pixels,
                 crop_window_size,
-                max_crops
+                max_crops,
+                exact_num_crops=self.exact_num_crops
             )
             src, img_mask = self.resize_image(
                 image,
@@ -452,19 +501,32 @@ class MultiModalPreprocessor:
                     pooled_h = (crop_h + self.image_pooling_h - 1) // self.image_pooling_h
                     after_padding_width = image_token_length_w - pooled_w - crop_x0
                     after_padding_height = image_token_length_h - pooled_h - crop_y0
-                    patch_ordering_arr.append(
-                        np.pad(
+                    if self.force_full_tokens:
+                        # Force full 12x12 tokens: assign indices to padded positions too
+                        full_tokens = image_token_length_h * image_token_length_w  # 12*12=144
+                        patch_ordering_arr.append(
                             np.reshape(
-                                np.arange(on, on+pooled_h*pooled_w, dtype=np.int32),
-                                (pooled_h, pooled_w)),
-                            [[crop_y0, after_padding_height], [crop_x0, after_padding_width]],
-                            constant_values=-1, mode='constant'
+                                np.arange(on, on + full_tokens, dtype=np.int32),
+                                (image_token_length_h, image_token_length_w)
+                            )
                         )
-                    )
-                    patches_arr.append(src[y0:y0+crop_size, x0:x0+crop_size])
-                    mask_arr.append(img_mask[y0:y0+crop_size, x0:x0+crop_size])
-
-                    on += pooled_h*pooled_w
+                        # For masks, mark all tokens as valid (padding treated as valid tokens)
+                        mask_arr.append(np.ones((crop_size, crop_size), dtype=np.float32))
+                        patches_arr.append(src[y0:y0+crop_size, x0:x0+crop_size])
+                        on += full_tokens
+                    else:
+                        patch_ordering_arr.append(
+                            np.pad(
+                                np.reshape(
+                                    np.arange(on, on+pooled_h*pooled_w, dtype=np.int32),
+                                    (pooled_h, pooled_w)),
+                                [[crop_y0, after_padding_height], [crop_x0, after_padding_width]],
+                                constant_values=-1, mode='constant'
+                            )
+                        )
+                        patches_arr.append(src[y0:y0+crop_size, x0:x0+crop_size])
+                        mask_arr.append(img_mask[y0:y0+crop_size, x0:x0+crop_size])
+                        on += pooled_h*pooled_w
                     on_patch += 1
             patches = np.stack(patches_arr)
             patch_ordering = np.stack(patch_ordering_arr)
@@ -503,22 +565,40 @@ class MultiModalPreprocessor:
                     return single_crop_window_patches
 
             # Now build the output tokens
-            h = get_num_patches(tiling[0], self.image_pooling_h)
-            w = get_num_patches(tiling[1], self.image_pooling_w)
-            per_row = np.full(
-                (w // self.image_pooling_w,),
-                self.image_patch_token_id,
-                dtype=np.int32
-            )
-            if self.use_col_tokens:
-                per_row = np.concatenate([per_row, [self.image_col_token_id]], 0)
+            if self.force_full_tokens:
+                # Force exact token grid: each crop contributes exactly 12x12 tokens
+                tokens_w = image_token_length_w * tiling[1]
+                tokens_h = image_token_length_h * tiling[0]
+                per_row = np.full(
+                    (tokens_w,),
+                    self.image_patch_token_id,
+                    dtype=np.int32
+                )
+                if self.use_col_tokens:
+                    per_row = np.concatenate([per_row, [self.image_col_token_id]], 0)
+                joint = np.tile(per_row, [tokens_h])
+                joint = [
+                    [self.image_start_token_id],
+                    joint,
+                    [self.image_end_token_id]
+                ]
+            else:
+                h = get_num_patches(tiling[0], self.image_pooling_h)
+                w = get_num_patches(tiling[1], self.image_pooling_w)
+                per_row = np.full(
+                    (w // self.image_pooling_w,),
+                    self.image_patch_token_id,
+                    dtype=np.int32
+                )
+                if self.use_col_tokens:
+                    per_row = np.concatenate([per_row, [self.image_col_token_id]], 0)
 
-            joint = np.tile(per_row, [h // self.image_pooling_h])
-            joint = [
-                [self.image_start_token_id],
-                joint,
-                [self.image_end_token_id]
-            ]
+                joint = np.tile(per_row, [h // self.image_pooling_h])
+                joint = [
+                    [self.image_start_token_id],
+                    joint,
+                    [self.image_end_token_id]
+                ]
 
             # Finally do the same for the global image
             resized, _ = self.resize_image(image, base_image_input_size, is_training, rng)
@@ -565,6 +645,16 @@ class MultiModalPreprocessor:
         image_input_idx = np.nonzero(image_input_idx)[0].astype(np.int32)
 
         n_tokens = image_input_idx.shape[0]
+
+        # Fast path for force_full_tokens: we already constructed a dense grid of
+        # tokens_per_image per (global + crop), so just reshape directly.
+        if self.force_full_tokens:
+            # Ensure length is multiple of tokens_per_image
+            n_images = max(1, len(image_input_idx) // tokens_per_image)
+            total_tokens = n_images * tokens_per_image
+            image_input_idx = image_input_idx[:total_tokens]
+            image_input_idx = np.reshape(image_input_idx, [-1, tokens_per_image])
+            return image_input_idx
 
         if patch_order is not None:
             patch_order = np.reshape(patch_order, [-1])
@@ -858,6 +948,22 @@ class Preprocessor:
             if formatter_metadata:
                 metadata.update(formatter_metadata)
             batch["metadata"] = metadata
+        
+        # Preserve important fields from example that might not be in metadata.
+        # This is needed for profiling / evaluation so that we can later record
+        # rich sample-level information (e.g., image id, question text, options)
+        # into the JSON results.
+        if "metadata" not in batch:
+            batch["metadata"] = {}
+        
+        # 1) Options (e.g., MMMU, ScienceQA-style multiple choice)
+        if "options" in example and "options" not in batch["metadata"]:
+            batch["metadata"]["options"] = example["options"]
+        
+        # 2) Question text (so profiling results can include it)
+        if "question" in example and "question" not in batch["metadata"]:
+            batch["metadata"]["question"] = example["question"]
+        
         return batch
 
     @property

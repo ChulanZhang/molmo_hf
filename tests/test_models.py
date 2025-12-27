@@ -1,5 +1,5 @@
 """
-测试模型相关的功能
+Tests for model-related functionality.
 """
 import pytest
 import torch
@@ -11,10 +11,10 @@ sys.path.insert(0, str(project_root))
 
 
 class TestMolmoModel:
-    """测试 MolmoModel 类"""
+    """Validate MolmoModel."""
     
     def test_model_import(self):
-        """测试模型类的导入"""
+        """Import model classes."""
         from molmo.models.modeling_molmoe import MolmoModel, MolmoForCausalLM
         from molmo.models.config_molmoe import MolmoConfig
         
@@ -23,7 +23,7 @@ class TestMolmoModel:
         assert MolmoConfig is not None
     
     def test_model_config_creation(self):
-        """测试模型配置的创建"""
+        """Create a model config."""
         from molmo.models.config_molmoe import MolmoConfig
         
         config = MolmoConfig(
@@ -39,25 +39,25 @@ class TestMolmoModel:
         assert config.n_layers == 2
     
     def test_model_training_methods(self):
-        """测试模型训练方法的可用性"""
+        """Check training methods exist."""
         from molmo.models.modeling_molmoe import MolmoModel
         
-        # 检查静态方法
+        # Static methods
         assert hasattr(MolmoModel, 'get_connector_parameters')
         assert hasattr(MolmoModel, 'get_vit_parameters')
         assert hasattr(MolmoModel, 'get_llm_parameters')
         
-        # 检查实例方法
+        # Instance methods
         assert hasattr(MolmoModel, 'set_activation_checkpointing')
         assert hasattr(MolmoModel, 'reset_with_pretrained_weights')
         assert hasattr(MolmoModel, 'get_fsdp_wrap_policy')
         assert hasattr(MolmoModel, 'num_params')
     
     def test_model_static_methods(self):
-        """测试模型的静态方法"""
+        """Call static helpers."""
         from molmo.models.modeling_molmoe import MolmoModel
         
-        # 测试静态方法调用（不创建模型实例）
+        # Call static methods without creating a model
         connector_params = MolmoModel.get_connector_parameters()
         assert isinstance(connector_params, (list, tuple, set))
         
@@ -69,7 +69,7 @@ class TestMolmoModel:
     
     @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
     def test_model_initialization(self):
-        """测试模型初始化（需要 CUDA）"""
+        """Initialize model on CUDA."""
         from molmo.models.config_molmoe import MolmoConfig
         from molmo.models.modeling_molmoe import MolmoModel
         
@@ -87,7 +87,7 @@ class TestMolmoModel:
         assert hasattr(model, 'transformer')
     
     def test_model_num_params(self):
-        """测试模型参数计数"""
+        """Count model parameters."""
         from molmo.models.config_molmoe import MolmoConfig
         from molmo.models.modeling_molmoe import MolmoModel
         

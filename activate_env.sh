@@ -15,12 +15,12 @@ if [ -n "$CONDA_DEFAULT_ENV" ]; then
 fi
 
 # Set environment variables
-# MOLMO_DATA_DIR: Directory for storing MolMO data
-# HF_HOME: Directory for storing Hugging Face data
-# export MOLMO_DATA_DIR=/anvil/projects/x-cis250705/data/vlm/molmo
-# export HF_HOME=/anvil/projects/x-cis250705/data/vlm/huggingface
-export MOLMO_DATA_DIR=/anvil/scratch/x-pwang1/data/vlm/molmo
-export HF_HOME=/anvil/scratch/x-pwang1/data/vlm/huggingface
+# !IMPORTANT: MOLMO_DATA_DIR: Directory for storing MolMO data
+# !IMPORTANT: HF_HOME: Directory for storing Hugging Face data
+export MOLMO_DATA_DIR=/anvil/projects/x-cis250705/data/vlm/molmo
+export HF_HOME=/anvil/projects/x-cis250705/data/vlm/huggingface
+# export MOLMO_DATA_DIR=/anvil/scratch/x-pwang1/data/vlm/molmo
+# export HF_HOME=/anvil/scratch/x-pwang1/data/vlm/huggingface
 
 # Re-apply colorful prompt since module loads may reset PS1
 if [[ $- == *i* ]]; then
