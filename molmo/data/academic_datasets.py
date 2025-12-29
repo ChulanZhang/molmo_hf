@@ -176,7 +176,56 @@ class Vqa2(Dataset):
     def __init__(self, split, multi_question=False):
         assert split in ["train", "validation", "test"]
         self.multi_question = multi_question
-        self.dataset = VQAv2BuilderMultiQA(DOWNLOADS).as_dataset(split=split)
+        
+        # Check if dataset cache exists, if not, prepare it
+        builder = VQAv2BuilderMultiQA(DOWNLOADS)
+        try:
+            self.dataset = builder.as_dataset(split=split)
+        except (FileNotFoundError, ValueError) as e:
+            error_msg = str(e)
+            if "could not find data" in error_msg or "Please make sure to call builder.download_and_prepare" in error_msg:
+                logging.warning(f"VQA v2 dataset cache not found. Preparing dataset (this may take a while)...")
+                import fsspec
+                from fsspec.implementations.http import HTTPFileSystem
+                from aiohttp import ClientTimeout
+                
+                # Set timeout for downloads
+                original_timeout = os.environ.get("FSSPEC_TIMEOUT")
+                original_default_timeout = getattr(HTTPFileSystem, '_default_timeout', None)
+                original_client_kwargs = getattr(HTTPFileSystem, 'client_kwargs', {})
+                
+                try:
+                    os.environ["FSSPEC_TIMEOUT"] = "3600"
+                    HTTPFileSystem._default_timeout = 3600
+                    if not hasattr(HTTPFileSystem, 'client_kwargs') or HTTPFileSystem.client_kwargs is None:
+                        HTTPFileSystem.client_kwargs = {}
+                    HTTPFileSystem.client_kwargs = HTTPFileSystem.client_kwargs.copy()
+                    HTTPFileSystem.client_kwargs['timeout'] = ClientTimeout(total=3600, connect=60)
+                    
+                    download_config = datasets.DownloadConfig(
+                        num_proc=1,
+                        max_retries=5,
+                    )
+                    builder.download_and_prepare(download_config=download_config)
+                    logging.info("Dataset preparation completed. Loading dataset...")
+                    self.dataset = builder.as_dataset(split=split)
+                finally:
+                    if original_timeout is not None:
+                        os.environ["FSSPEC_TIMEOUT"] = original_timeout
+                    elif "FSSPEC_TIMEOUT" in os.environ:
+                        del os.environ["FSSPEC_TIMEOUT"]
+                    
+                    if original_default_timeout is not None:
+                        HTTPFileSystem._default_timeout = original_default_timeout
+                    elif hasattr(HTTPFileSystem, '_default_timeout'):
+                        delattr(HTTPFileSystem, '_default_timeout')
+                    
+                    if original_client_kwargs:
+                        HTTPFileSystem.client_kwargs = original_client_kwargs
+                    elif hasattr(HTTPFileSystem, 'client_kwargs'):
+                        HTTPFileSystem.client_kwargs = {}
+            else:
+                raise
         if not self.multi_question:
             flattened_data = []
             for item in self.dataset:
@@ -298,7 +347,55 @@ class CocoCaption(Dataset):
             logging.warning("COCO Caption doesn't have a test split, using validation instead")
             split = "validation"
         
-        self.dataset = CocoCaptionBuilder(DOWNLOADS).as_dataset(split=split)
+        # Check if dataset cache exists, if not, prepare it
+        builder = CocoCaptionBuilder(DOWNLOADS)
+        try:
+            self.dataset = builder.as_dataset(split=split)
+        except (FileNotFoundError, ValueError) as e:
+            error_msg = str(e)
+            if "could not find data" in error_msg or "Please make sure to call builder.download_and_prepare" in error_msg:
+                logging.warning(f"COCO Caption dataset cache not found. Preparing dataset (this may take a while)...")
+                import fsspec
+                from fsspec.implementations.http import HTTPFileSystem
+                from aiohttp import ClientTimeout
+                
+                # Set timeout for downloads
+                original_timeout = os.environ.get("FSSPEC_TIMEOUT")
+                original_default_timeout = getattr(HTTPFileSystem, '_default_timeout', None)
+                original_client_kwargs = getattr(HTTPFileSystem, 'client_kwargs', {})
+                
+                try:
+                    os.environ["FSSPEC_TIMEOUT"] = "3600"
+                    HTTPFileSystem._default_timeout = 3600
+                    if not hasattr(HTTPFileSystem, 'client_kwargs') or HTTPFileSystem.client_kwargs is None:
+                        HTTPFileSystem.client_kwargs = {}
+                    HTTPFileSystem.client_kwargs = HTTPFileSystem.client_kwargs.copy()
+                    HTTPFileSystem.client_kwargs['timeout'] = ClientTimeout(total=3600, connect=60)
+                    
+                    download_config = datasets.DownloadConfig(
+                        num_proc=1,
+                        max_retries=5,
+                    )
+                    builder.download_and_prepare(download_config=download_config)
+                    logging.info("Dataset preparation completed. Loading dataset...")
+                    self.dataset = builder.as_dataset(split=split)
+                finally:
+                    if original_timeout is not None:
+                        os.environ["FSSPEC_TIMEOUT"] = original_timeout
+                    elif "FSSPEC_TIMEOUT" in os.environ:
+                        del os.environ["FSSPEC_TIMEOUT"]
+                    
+                    if original_default_timeout is not None:
+                        HTTPFileSystem._default_timeout = original_default_timeout
+                    elif hasattr(HTTPFileSystem, '_default_timeout'):
+                        delattr(HTTPFileSystem, '_default_timeout')
+                    
+                    if original_client_kwargs:
+                        HTTPFileSystem.client_kwargs = original_client_kwargs
+                    elif hasattr(HTTPFileSystem, 'client_kwargs'):
+                        HTTPFileSystem.client_kwargs = {}
+            else:
+                raise
 
     def __len__(self):
         return len(self.dataset)
@@ -653,7 +750,56 @@ class TallyQa(Dataset):
                         Expected files: train2014.zip, val2014.zip
         """
         assert split in ["train", "test"]
-        self.dataset = TallyQaBuilder(coco_source=coco_source).as_dataset(split=split)
+        
+        # Check if dataset cache exists, if not, prepare it
+        builder = TallyQaBuilder(coco_source=coco_source)
+        try:
+            self.dataset = builder.as_dataset(split=split)
+        except (FileNotFoundError, ValueError) as e:
+            error_msg = str(e)
+            if "could not find data" in error_msg or "Please make sure to call builder.download_and_prepare" in error_msg:
+                logging.warning(f"TallyQA dataset cache not found. Preparing dataset (this may take a while)...")
+                import fsspec
+                from fsspec.implementations.http import HTTPFileSystem
+                from aiohttp import ClientTimeout
+                
+                # Set timeout for downloads
+                original_timeout = os.environ.get("FSSPEC_TIMEOUT")
+                original_default_timeout = getattr(HTTPFileSystem, '_default_timeout', None)
+                original_client_kwargs = getattr(HTTPFileSystem, 'client_kwargs', {})
+                
+                try:
+                    os.environ["FSSPEC_TIMEOUT"] = "3600"
+                    HTTPFileSystem._default_timeout = 3600
+                    if not hasattr(HTTPFileSystem, 'client_kwargs') or HTTPFileSystem.client_kwargs is None:
+                        HTTPFileSystem.client_kwargs = {}
+                    HTTPFileSystem.client_kwargs = HTTPFileSystem.client_kwargs.copy()
+                    HTTPFileSystem.client_kwargs['timeout'] = ClientTimeout(total=3600, connect=60)
+                    
+                    download_config = datasets.DownloadConfig(
+                        num_proc=1,
+                        max_retries=5,
+                    )
+                    builder.download_and_prepare(download_config=download_config)
+                    logging.info("Dataset preparation completed. Loading dataset...")
+                    self.dataset = builder.as_dataset(split=split)
+                finally:
+                    if original_timeout is not None:
+                        os.environ["FSSPEC_TIMEOUT"] = original_timeout
+                    elif "FSSPEC_TIMEOUT" in os.environ:
+                        del os.environ["FSSPEC_TIMEOUT"]
+                    
+                    if original_default_timeout is not None:
+                        HTTPFileSystem._default_timeout = original_default_timeout
+                    elif hasattr(HTTPFileSystem, '_default_timeout'):
+                        delattr(HTTPFileSystem, '_default_timeout')
+                    
+                    if original_client_kwargs:
+                        HTTPFileSystem.client_kwargs = original_client_kwargs
+                    elif hasattr(HTTPFileSystem, 'client_kwargs'):
+                        HTTPFileSystem.client_kwargs = {}
+            else:
+                raise
         super().__init__()
 
     def __len__(self):

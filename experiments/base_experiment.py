@@ -158,10 +158,14 @@ class BaseExperiment(ABC):
         self.model_path = model_path
         
         # Device Setup
-        if device == "cuda" and torch.cuda.is_available():
-            device_idx = torch.cuda.current_device()
-            self.device = torch.device(f"cuda:{device_idx}")
-            log.info(f"Using GPU device: {self.device} (GPU {device_idx}: {torch.cuda.get_device_name(device_idx)})")
+        if device.startswith("cuda"):
+            if torch.cuda.is_available():
+                device_idx = torch.cuda.current_device()
+                self.device = torch.device(f"cuda:{device_idx}")
+                log.info(f"Using GPU device: {self.device} (GPU {device_idx}: {torch.cuda.get_device_name(device_idx)})")
+            else:
+                log.warning("Requested CUDA device but no CUDA GPUs available; falling back to CPU.")
+                self.device = torch.device("cpu")
         else:
             self.device = torch.device(device)
         

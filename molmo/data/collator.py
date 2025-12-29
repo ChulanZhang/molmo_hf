@@ -24,6 +24,27 @@ def _collate(tensors, max_sequence_length=None, dtype=None, pad=False, pad_value
         tensor = [x for x in tensors if x is not None][0]
         arr = np.full([len(tensors), max_len] + list(tensor.shape[1:]), pad_value,
                       dtype=dtype or tensor.dtype)
+    elif pad is False:
+        # No padding: use actual lengths (for batch_size=1, this allows dynamic seq_len)
+        max_len = max((0 if x is None else x.shape[0]) for x in tensors)
+        if max_sequence_length:
+            max_len = min(max_len, max_sequence_length)
+        
+        # For batch_size=1, we can use the actual tensor without padding
+        if len(tensors) == 1 and tensors[0] is not None:
+            tensor = tensors[0]
+            if max_sequence_length and len(tensor) > max_sequence_length:
+                tensor = tensor[:max_sequence_length]
+            # Convert to numpy array if needed, ensure correct dtype, then add batch dimension
+            if not isinstance(tensor, np.ndarray):
+                tensor = np.asarray(tensor)
+            if dtype is not None:
+                tensor = tensor.astype(dtype)
+            return torch.from_numpy(tensor[None, ...])  # Add batch dimension at the front
+        
+        # For multiple samples, pad to max_len in batch
+        arr = np.full([len(tensors), max_len] + list(tensors[0].shape[1:]), pad_value,
+                      dtype=dtype or tensors[0].dtype)
     else:
         max_len = max((0 if x is None else x.shape[0]) for x in tensors)
         if max_sequence_length:
@@ -49,12 +70,12 @@ class MMCollator:
     def __init__(self, max_sequence_length=None, include_metadata=True, pad=None,
                  max_crops=None):
         """
-        :param max_sequence_length: truncate examples longer than this length
+        :param max_sequence_length: truncate examples longer than this length (None = no truncation)
         :param include_metadata: whether to include the metadata in the out batch
-        :param pad: how to pad the tensors
+        :param pad: how to pad the tensors (True/"to_max" = pad to max_sequence_length, False = no padding, None = pad to max in batch)
         :param max_crops: max number of crops to use if padding to the max sequence length
         """
-        if pad:
+        if pad and pad != False:
             assert max_sequence_length is not None and max_crops is not None
         self.max_sequence_length = max_sequence_length
         self.max_crops = max_crops

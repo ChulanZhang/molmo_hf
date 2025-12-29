@@ -81,6 +81,11 @@ Complete documentation for the three main control knobs, unified in English with
   - Result recording format
   - Validation strategies
 
+- **vision_tokens_knob_tier_implementation_summary.md** - Tier Implementation Summary
+  - Implementation details of tier-based approach in `select_tiling`
+  - API changes and migration path
+  - Usage examples and testing
+
 - **moe_topk_knob.md** - MoE Top-K Control Knob
   - Dynamic MoE top-K adjustment methods
   - Performance impact and quality tradeoffs

@@ -138,7 +138,10 @@ class TallyQaBuilder(datasets.GeneratorBasedBuilder):
             image_src, path = image.split("/")
             image_path = join(images[image_src], image_src, path)
             if not exists(image_path):
-                import pdb; pdb.set_trace()
+                import logging
+                log = logging.getLogger(__name__)
+                log.warning(f"Image path does not exist: {image_path}, skipping image_id={image_id}")
+                continue
             yield image_id, {
                 "image_id": image_id,
                 "image": image_path,

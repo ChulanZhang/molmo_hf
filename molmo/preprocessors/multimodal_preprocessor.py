@@ -1,7 +1,7 @@
 import dataclasses
 import math
 import warnings
-from typing import List, Optional, Union, Any, Tuple, TYPE_CHECKING
+from typing import List, Optional, Union, Any, Tuple, Dict, TYPE_CHECKING
 
 import PIL
 from PIL import ImageFile
@@ -299,60 +299,106 @@ def dino_resize_and_pad(
     return resized, image_mask
 
 
-def select_tiling(h, w, patch_size, max_num_crops, exact_num_crops=None):
+def select_tiling(h, w, patch_size, max_num_crops, tier=None):
     """
-    Divide in image of size [w, h] in up to max_num_patches of size patch_size.
+    Select optimal tiling configuration for an image.
     
     Args:
         h: Image height (after subtracting margins)
         w: Image width (after subtracting margins)
         patch_size: Crop window size (e.g., 224)
         max_num_crops: Maximum number of crops allowed
-        exact_num_crops: If provided, force selection of exactly this many crops.
-                        If None, uses adaptive selection based on image size.
+        tier: Optional dict with keys:
+            - min_crops: Minimum number of crops (default: 1)
+            - max_crops: Maximum number of crops (default: max_num_crops)
+            - preferred_crops: List of preferred crop counts to try first
+            - mismatch_threshold: Maximum acceptable mismatch for preferred crops (default: 0.3)
+            If provided, selects best crop count within tier range based on aspect ratio.
+            If None, uses adaptive selection based on image size.
     
     Returns:
         (rows, cols) tiling configuration
     """
-    # If exact_num_crops is specified, force selection of that many crops
-    if exact_num_crops is not None:
-        # Find all tilings that result in exactly exact_num_crops
-        exact_tilings = []
-        for i in range(1, exact_num_crops + 1):
-            if exact_num_crops % i == 0:
-                j = exact_num_crops // i
-                exact_tilings.append((i, j))
-        
-        if not exact_tilings:
-            # Fallback: use (1, exact_num_crops) if no exact match
-            return (1, exact_num_crops)
-        
-        # Among exact tilings, select the one closest to image aspect ratio
-        original_size = np.stack([h, w], dtype=np.float32)
-        aspect_ratio = w / h if h > 0 else 1.0
-        
-        best_tiling = None
-        best_match = float('inf')
-        
-        for i, j in exact_tilings:
-            tiling_resolution = np.array([i * patch_size, j * patch_size], dtype=np.float32)
-            tiling_aspect = tiling_resolution[1] / tiling_resolution[0] if tiling_resolution[0] > 0 else 1.0
-            aspect_diff = abs(tiling_aspect - aspect_ratio)
-            if aspect_diff < best_match:
-                best_match = aspect_diff
-                best_tiling = (i, j)
-        
-        return best_tiling if best_tiling else exact_tilings[0]
+    aspect_ratio = w / h if h > 0 else 1.0
     
-    # Original adaptive selection logic
-    original_size = np.stack([h, w])  # [1, 2]
-    original_res = h * w
+    # Tier-based selection: find best crop count within tier range
+    if tier is not None:
+        min_crops = tier.get("min_crops", 1)
+        max_crops_in_tier = min(tier.get("max_crops", max_num_crops), max_num_crops)
+        preferred_crops = tier.get("preferred_crops", [])
+        mismatch_threshold = tier.get("mismatch_threshold", 0.3)
+        
+        # Helper function to find best tiling for a given crop count
+        def find_best_tiling_for_crops(crops):
+            """Find best tiling for a specific crop count based on aspect ratio."""
+            tilings = []
+            for i in range(1, crops + 1):
+                if crops % i == 0:
+                    j = crops // i
+                    tilings.append((i, j))
+            
+            if not tilings:
+                return None, float('inf')
+            
+            best_tiling = None
+            best_mismatch = float('inf')
+            for rows, cols in tilings:
+                tiling_h = rows * patch_size
+                tiling_w = cols * patch_size
+                tiling_aspect = tiling_w / tiling_h if tiling_h > 0 else 1.0
+                mismatch = abs(tiling_aspect - aspect_ratio)
+                if mismatch < best_mismatch:
+                    best_mismatch = mismatch
+                    best_tiling = (rows, cols)
+            return best_tiling, best_mismatch
+        
+        best_crops = None
+        best_tiling = None
+        best_mismatch = float('inf')
+        
+        # First, try preferred crop counts
+        for crops in preferred_crops:
+            if crops < min_crops or crops > max_crops_in_tier:
+                continue
+            tiling, mismatch = find_best_tiling_for_crops(crops)
+            if tiling is not None and mismatch < best_mismatch:
+                best_mismatch = mismatch
+                best_crops = crops
+                best_tiling = tiling
+        
+        # If mismatch is acceptable, return preferred crop
+        if best_mismatch < mismatch_threshold and best_tiling is not None:
+            return best_tiling
+        
+        # Otherwise, try all crop counts in tier range
+        for crops in range(min_crops, max_crops_in_tier + 1):
+            if crops in preferred_crops:
+                continue  # Already tried
+            tiling, mismatch = find_best_tiling_for_crops(crops)
+            if tiling is not None and mismatch < best_mismatch:
+                best_mismatch = mismatch
+                best_crops = crops
+                best_tiling = tiling
+        
+        # Return best found, or fallback to smallest tiling in tier
+        if best_tiling is not None:
+            return best_tiling
+        # Fallback: use smallest tiling in tier
+        fallback_tiling, _ = find_best_tiling_for_crops(min_crops)
+        if fallback_tiling is not None:
+            return fallback_tiling
+        # Last resort: use (1, min_crops)
+        return (1, min_crops)
+    
+    # Original adaptive selection logic (when tier is None)
+    # Generate all possible tilings up to max_num_crops
     tilings = []
     for i in range(1, max_num_crops + 1):
         for j in range(1, max_num_crops + 1):
-            if i*j <= max_num_crops:
+            if i * j <= max_num_crops:
                 tilings.append((i, j))
-    # sort so argmin and argmax favour smaller tilings in the event of a tie
+    
+    # Sort so argmin and argmax favour smaller tilings in the event of a tie
     tilings.sort(key=lambda x: (x[0]*x[1], x[0]))
     candidate_tilings = np.array(tilings, dtype=np.int32)  # [n_resolutions, 2]
     candidate_resolutions = candidate_tilings * patch_size  # [n_resolutions, 2]
@@ -429,7 +475,7 @@ class MultiModalPreprocessor:
     crop_mode: str = "resize"
     # max_crops: int = 6
     max_crops: int = 12
-    exact_num_crops: Optional[int] = None  # If set, force selection of exactly this many crops
+    tier: Optional[Dict[str, Any]] = None  # Tier configuration for adaptive crop selection
     overlap_margins: Tuple[int, int] = (4, 4)
     resize: str = "default"
     use_col_tokens: bool = True
@@ -558,7 +604,7 @@ class MultiModalPreprocessor:
                 original_image_w - total_margin_pixels,
                 crop_window_size,
                 max_crops,
-                exact_num_crops=self.exact_num_crops
+                tier=self.tier
             )
             src, img_mask = self.resize_image(
                 image,
@@ -1216,13 +1262,13 @@ class MolmoImageProcessor(BaseImageProcessor):
         crop_window_patches = crop_patches - (right_margin + left_margin)  # usable patches
         crop_window_size = crop_window_patches * base_image_input_d
         # Use select_tiling (now in same file)
-        # Note: MolmoImageProcessor doesn't support exact_num_crops, so we pass None
+        # Note: MolmoImageProcessor doesn't support tier-based selection, so we pass None
         tiling = select_tiling(
             original_image_h - total_margin_pixels,
             original_image_w - total_margin_pixels,
             crop_window_size,
             max_crops,  # max_num_crops parameter
-            exact_num_crops=None  # MolmoImageProcessor doesn't support exact crop control
+            tier=None  # MolmoImageProcessor uses adaptive selection
         )
         # Use resize_and_pad_with_normalize (now in same file)
         src, img_mask = resize_and_pad_with_normalize(

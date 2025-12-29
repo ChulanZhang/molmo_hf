@@ -135,7 +135,7 @@ torchrun --nproc-per-node=4 experiments/core_exp/acc_lat_profiling.py \
     --sampling_strategy balanced \
     --num_samples 1000 \
     --num_runs_per_sample 3 \
-    --vision_tokens_list 432 720 1008 1440 \
+    --tier_list low medium high \
     --top_k_list 8 12 \
     --num_active_blocks_list 14 16 \
     --resize_to_fill
@@ -164,7 +164,7 @@ USE_PROFILER=true NUM_SAMPLES=200 bash experiments/core_exp/run_multi_datasets_h
 python experiments/core_exp/acc_lat_profiling.py \
     --use_profiler \
     --num_samples 200 \
-    --vision_tokens_list 288 432 576 720
+    --tier_list low medium high
 ```
 
 ### Custom Configuration
@@ -172,7 +172,7 @@ python experiments/core_exp/acc_lat_profiling.py \
 ```bash
 # Custom vision tokens, top_k, and blocks
 python experiments/core_exp/acc_lat_profiling.py \
-    --vision_tokens_list 288 432 576 \
+    --tier_list low medium \
     --top_k_list 4 8 16 32 \
     --num_active_blocks_list 8 12 16 20 24 \
     --sampling_strategy stratified \
@@ -185,15 +185,15 @@ python experiments/core_exp/acc_lat_profiling.py \
 
 Each configuration is saved in a separate file with descriptive naming:
 
-**Filename format** (vision_tokens_list mode):
+**Filename format** (tier-based mode):
 ```
-<task_name>_imgsizetokens<T>_topk<k>_blocks<n>.json
+<task_name>_imgsizetier-<tier>_crops<mean>_topk<k>_blocks<n>.json
 ```
 
 **Examples**:
-- `coco-2014-vqa_imgsizetokens432_topk8_blocks14.json`
-- `coco-2014-vqa_imgsizetokens720_topk12_blocks16.json`
-- `coco-2014-vqa_imgsizetokens1008_topk8_blocks14.json`
+- `coco-2014-vqa_imgsizetier-low_crops2_topk8_blocks14.json`
+- `coco-2014-vqa_imgsizetier-medium_crops6_topk12_blocks16.json`
+- `coco-2014-vqa_imgsizetier-high_crops12_topk8_blocks14.json`
 
 **Additional files**:
 - `profiler_results_config_{config_idx}_sample_{sample_idx}.txt`: Profiler output (if `--use_profiler` enabled)
@@ -201,10 +201,13 @@ Each configuration is saved in a separate file with descriptive naming:
 **Structure**:
 ```json
 {
-  "target_vision_tokens": 1008,
-  "target_crops": 6,
+  "tier": "medium",
+  "tier_range": {"min_crops": 4, "max_crops": 8},
+  "selected_crops_mean": 6.2,
+  "selected_crops_distribution": {"4": 10, "6": 25, "8": 15},
+  "selected_vision_tokens_mean": 1008.0,
   "actual_vision_tokens_mean": 1001.5,
-  "max_crops": 6,
+  "max_crops": 8,
   "top_k": 12,
   "num_active_blocks": 16,
   "num_total_blocks": 16,
@@ -335,26 +338,27 @@ Uses configuration result files:
 
 ### 1. Vision Tokens Control (Primary Knob)
 
-**Before**: Used `image_size_list` (fixed dimensions, aspect ratio mismatches)
-**Now**: Uses `vision_tokens_list` (adaptive tiling, minimal distortion)
+**Before**: Used `image_size_list` or `vision_tokens_list` (fixed targets, aspect ratio mismatches)
+**Now**: Uses `tier_list` (tier-based adaptive crop selection, minimal distortion)
 
 ```python
-# Old approach (image_size_list)
-image_size_list = ["560x336", "560x784", "784x784"]
-# Problems:
-# - Fixed dimensions may not match original image aspect ratio
-# - Images are forced to resize to fixed dimensions, causing distortion
-# - select_tiling may choose different tiling than inferred
-
-# New approach (vision_tokens_list)
+# Old approach (vision_tokens_list)
 vision_tokens_list = [432, 720, 1008, 1440]
+# Problems:
+# - Fixed vision token targets may force square crop counts
+# - Images with different aspect ratios may get suboptimal tiling
+# - Limited flexibility for aspect ratio matching
+
+# New approach (tier_list)
+tier_list = ["low", "medium", "high"]
 # Benefits:
-# - Each image gets the best tiling for its aspect ratio
+# - Each image gets the best crop count within tier range for its aspect ratio
 # - Minimal distortion (aspect ratio preserved)
-# - Simple configuration, consistent experiments
+# - Adaptive selection ensures accuracy benefits from increased vision tokens
+# - Simple configuration: low (1-3 crops), medium (4-8 crops), high (9-15 crops)
 ```
 
-**See**: `docs/knobs/vision_tokens_knob.md` for detailed comparison and examples.
+**See**: `docs/knobs/vision_tokens_knob.md` and `docs/knobs/vision_tokens_knob_tier_implementation_summary.md` for detailed comparison and examples.
 
 ### 2. Resize to Fill
 

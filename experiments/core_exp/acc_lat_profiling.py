@@ -1,15 +1,16 @@
 """
-Combined Profiling: Accuracy and Latency with Vision Tokens Control
-Tests combinations of vision tokens (target), MoE top_k, and transformer blocks.
+Combined Profiling: Accuracy and Latency with Tier-Based Vision Token Control
+Tests combinations of tier-based vision tokens, MoE top_k, and transformer blocks.
 
 Key features:
-1. Vision tokens control: Target vision tokens → calculate max_crops → select tiling
+1. Tier-based vision token control: Tier (e.g., low/medium/high) → adaptive crop selection per image
 2. Combined accuracy and latency measurement
 3. Stage-wise latency breakdown (for E1 analysis)
 4. Dataset sampling support (consistent across runs)
 5. Optional PyTorch profiler (for detailed operator-level analysis)
 
 Records detailed data for E1, E2, E3 analysis.
+Each image's selected crops and actual vision tokens are recorded.
 """
 
 import argparse
@@ -44,6 +45,35 @@ sys.path.append(os.path.join(os.path.dirname(__file__), "../profiling/knob3_laye
 from exp_transformer_blocks_mask import BlockMaskWrapper
 
 log = logging.getLogger(__name__)
+
+
+# Tier configurations for adaptive crop selection
+VISION_TOKEN_TIERS = {
+    "low": {
+        "name": "low",
+        "min_crops": 1,
+        "max_crops": 3,
+        "preferred_crops": [2, 3],
+        "typical_vision_tokens": 432,
+        "description": "Small images, simple tasks"
+    },
+    "medium": {
+        "name": "medium",
+        "min_crops": 4,
+        "max_crops": 8,
+        "preferred_crops": [4, 6, 8],
+        "typical_vision_tokens": 1008,
+        "description": "Medium images, standard tasks"
+    },
+    "high": {
+        "name": "high",
+        "min_crops": 9,
+        "max_crops": 12,
+        "preferred_crops": [9, 12],
+        "typical_vision_tokens": 1872,
+        "description": "Large images, complex tasks"
+    },
+}
 
 
 def is_a100_gpu(device: Optional[torch.device] = None) -> bool:
@@ -171,71 +201,6 @@ def image_size_to_tiling(
     return rows, cols
 
 
-def calculate_theoretical_values(
-    target_vision_tokens: int,
-    original_image_size: Optional[Tuple[int, int]] = None,
-    crop_window_size: int = 224,
-    total_margin_pixels: int = 112,
-) -> Dict[str, Any]:
-    """
-    Calculate theoretical values from target vision tokens.
-    
-    Args:
-        target_vision_tokens: Target number of vision tokens
-        original_image_size: Original image size (width, height) or None
-        crop_window_size: Size of each crop window
-        total_margin_pixels: Total margin pixels
-    
-    Returns:
-        Dictionary with theoretical values:
-        - theoretical_num_crops: Number of crops
-        - theoretical_tiling: (rows, cols) tiling configuration
-        - theoretical_image_size: (height, width) target image size
-        - theoretical_vision_tokens: Theoretical vision tokens (should match target)
-    """
-    # Step 1: Calculate required crops
-    theoretical_num_crops = tokens_to_crops(target_vision_tokens)
-    
-    # Step 2: Find best tiling for aspect ratio
-    if original_image_size is not None:
-        orig_w, orig_h = original_image_size
-        aspect_ratio = orig_w / orig_h if orig_h > 0 else 1.0
-    else:
-        aspect_ratio = 1.0  # Default to square
-    
-    theoretical_tiling = crops_to_tiling(theoretical_num_crops, aspect_ratio)
-    
-    # Step 3: Calculate target resolution
-    theoretical_image_size = tiling_to_resolution(
-        theoretical_tiling, crop_window_size, total_margin_pixels
-    )
-    
-    # Step 4: Calculate theoretical vision tokens
-    theoretical_vision_tokens = (theoretical_num_crops + 1) * 144
-    
-    return {
-        "theoretical_num_crops": theoretical_num_crops,
-        "theoretical_tiling": theoretical_tiling,
-        "theoretical_image_size": theoretical_image_size,
-        "theoretical_vision_tokens": theoretical_vision_tokens,
-    }
-
-
-def image_size_to_tiling(
-    target_h: int,
-    target_w: int,
-    crop_window_size: int = 224,
-    total_margin_pixels: int = 112,
-) -> Tuple[int, int]:
-    """
-    Infer tiling (rows, cols) from target resized image size.
-    Inverse of tiling_to_resolution: rows ≈ (H - margin)/224, cols ≈ (W - margin)/224.
-    """
-    rows = max(1, round((target_h - total_margin_pixels) / crop_window_size))
-    cols = max(1, round((target_w - total_margin_pixels) / crop_window_size))
-    return rows, cols
-
-
 def calculate_actual_values(
     batch: Dict[str, torch.Tensor],
     actual_vision_tokens: int,
@@ -326,17 +291,16 @@ def crops_to_max_crops(num_crops: int) -> int:
     return num_crops
 
 
-def _generate_config_filename(config_result: Dict[str, Any], dataset_name: str, use_image_size_list: bool = False) -> str:
+def _generate_config_filename(config_result: Dict[str, Any], dataset_name: str, use_tier: bool = True) -> str:
     """
     Generate a descriptive filename for a configuration result.
     
-    Format (image_size_list mode): <task_name>_imgsize<H>x<W>_topk<k>_blocks<n>.json
-    Format (vision_tokens_list mode): <task_name>_visiontoken<T>_topk<k>_blocks<n>.json
+    Format (tier mode): <task_name>_imgsizetier-<tier_name>_crops<mean>_topk<k>_blocks<n>.json
     
     Args:
         config_result: Configuration result dictionary
         dataset_name: Dataset/task name (e.g., "coco_2014_vqa" -> "coco-2014-vqa")
-        use_image_size_list: If True, we're in image_size_list mode; if False, vision_tokens_list mode
+        use_tier: If True, we're in tier-based mode (default: True)
         
     Returns:
         Filename string
@@ -344,32 +308,11 @@ def _generate_config_filename(config_result: Dict[str, Any], dataset_name: str, 
     # Format dataset name: replace underscores with hyphens
     task_name = dataset_name.replace("_", "-")
     
-    # Determine which mode we're in and generate appropriate filename
-    if use_image_size_list:
-        # image_size_list mode: use theoretical_image_size (target_image_size is no longer stored)
-        theoretical_size = config_result.get("theoretical_image_size")
-        if theoretical_size and isinstance(theoretical_size, (list, tuple)) and len(theoretical_size) >= 2:
-            img_h, img_w = theoretical_size[0], theoretical_size[1]
-            img_size_str = f"{img_h}x{img_w}"
-            prefix = "imgsize"
-        else:
-            img_size_str = "unknown"
-            prefix = "imgsize"
-    else:
-        # vision_tokens_list mode: use target_vision_tokens (preferred) or target_crops
-        target_vision_tokens = config_result.get("target_vision_tokens")
-        if target_vision_tokens is not None:
-            img_size_str = f"{target_vision_tokens}"
-            prefix = "visiontoken"
-        else:
-            # Fallback to target_crops (renamed from num_crops)
-            target_crops = config_result.get("target_crops")
-            if target_crops is not None:
-                img_size_str = f"crops{target_crops}"
-                prefix = "visiontoken"
-            else:
-                img_size_str = "unknown"
-                prefix = "visiontoken"
+    # Tier-based mode: use tier name and selected crops mean
+    tier_name = config_result.get("tier", "unknown")
+    selected_crops_mean = int(config_result.get("selected_crops_mean", 0))
+    img_size_str = f"tier-{tier_name}_crops{selected_crops_mean}"
+    prefix = "imgsize"
     
     # Extract top_k
     top_k = config_result.get("top_k", "unknown")
@@ -514,191 +457,6 @@ class CombinedProfilingExperiment(BaseExperiment):
             log.warning(f"Could not get vision tokens from image_input_idx, estimating: {num_vision_tokens}")
             return num_vision_tokens
     
-    def _vision_tokens_to_max_crops(self, target_tokens: int) -> int:
-        """
-        Convert target vision tokens to max_crops parameter.
-        
-        Args:
-            target_tokens: Target number of vision tokens
-        
-        Returns:
-            max_crops parameter value
-        """
-        num_crops = tokens_to_crops(target_tokens)
-        max_crops = crops_to_max_crops(num_crops)
-        return max_crops
-    
-    def _generate_sparse_combinations(
-        self,
-        vision_tokens_list: List[int],
-        top_k_list: List[int],
-        num_active_blocks_list: List[int],
-        sampling_strategy: str = "balanced",
-        max_combinations: int = 50,
-        seed: int = 66,  # Random seed for reproducibility
-    ) -> List[Tuple[int, int, int]]:
-        """
-        Generate sparse combinations of the three knobs.
-        
-        Args:
-            vision_tokens_list: List of target vision token values
-            top_k_list: List of top_k values
-            num_active_blocks_list: List of num_active_blocks values
-            sampling_strategy: Strategy for sparse sampling
-            max_combinations: Maximum number of combinations
-        
-        Returns:
-            List of (vision_tokens, top_k, num_active_blocks) tuples
-        """
-        if sampling_strategy == "full":
-            combinations = list(itertools.product(vision_tokens_list, top_k_list, num_active_blocks_list))
-            log.info(f"Full grid search: {len(combinations)} combinations")
-            return combinations
-        
-        elif sampling_strategy == "balanced":
-            # Balanced coverage: 3-4 values from each dimension
-            # If list has only 1 value, use it directly to avoid duplicates
-            if len(vision_tokens_list) >= 4:
-                sparse_vision_tokens = [
-                    vision_tokens_list[0],
-                    vision_tokens_list[len(vision_tokens_list)//3],
-                    vision_tokens_list[2*len(vision_tokens_list)//3],
-                    vision_tokens_list[-1]
-                ]
-            elif len(vision_tokens_list) == 1:
-                sparse_vision_tokens = vision_tokens_list
-            else:
-                sparse_vision_tokens = [vision_tokens_list[0], vision_tokens_list[len(vision_tokens_list)//2], vision_tokens_list[-1]]
-                # Remove duplicates while preserving order
-                sparse_vision_tokens = list(dict.fromkeys(sparse_vision_tokens))
-            
-            if len(top_k_list) >= 4:
-                sparse_top_k = [
-                    top_k_list[0],
-                    top_k_list[len(top_k_list)//3],
-                    top_k_list[2*len(top_k_list)//3],
-                    top_k_list[-1]
-                ]
-            elif len(top_k_list) == 1:
-                sparse_top_k = top_k_list
-            else:
-                sparse_top_k = [top_k_list[0], top_k_list[len(top_k_list)//2], top_k_list[-1]]
-                # Remove duplicates while preserving order
-                sparse_top_k = list(dict.fromkeys(sparse_top_k))
-            
-            if len(num_active_blocks_list) >= 4:
-                sparse_blocks = [
-                    num_active_blocks_list[0],
-                    num_active_blocks_list[len(num_active_blocks_list)//3],
-                    num_active_blocks_list[2*len(num_active_blocks_list)//3],
-                    num_active_blocks_list[-1]
-                ]
-            elif len(num_active_blocks_list) == 1:
-                sparse_blocks = num_active_blocks_list
-            else:
-                sparse_blocks = [num_active_blocks_list[0], num_active_blocks_list[len(num_active_blocks_list)//2], num_active_blocks_list[-1]]
-                # Remove duplicates while preserving order
-                sparse_blocks = list(dict.fromkeys(sparse_blocks))
-            
-            combinations = list(itertools.product(sparse_vision_tokens, sparse_top_k, sparse_blocks))
-            # Remove duplicate combinations (in case of duplicate values in sparse lists)
-            combinations = list(dict.fromkeys(combinations))
-            log.info(f"Balanced sampling: {len(combinations)} combinations")
-            log.info(f"  vision_tokens: {sparse_vision_tokens}, top_k: {sparse_top_k}, blocks: {sparse_blocks}")
-            return combinations
-        
-        elif sampling_strategy == "stratified":
-            # Stratified: min, middle, max
-            # If list has only 1 value, use it directly to avoid duplicates
-            if len(vision_tokens_list) == 1:
-                sparse_vision_tokens = vision_tokens_list
-            else:
-                sparse_vision_tokens = [vision_tokens_list[0], vision_tokens_list[len(vision_tokens_list)//2], vision_tokens_list[-1]]
-                sparse_vision_tokens = list(dict.fromkeys(sparse_vision_tokens))
-            
-            if len(top_k_list) == 1:
-                sparse_top_k = top_k_list
-            else:
-                sparse_top_k = [top_k_list[0], top_k_list[len(top_k_list)//2], top_k_list[-1]]
-                sparse_top_k = list(dict.fromkeys(sparse_top_k))
-            
-            if len(num_active_blocks_list) == 1:
-                sparse_blocks = num_active_blocks_list
-            else:
-                sparse_blocks = [num_active_blocks_list[0], num_active_blocks_list[len(num_active_blocks_list)//2], num_active_blocks_list[-1]]
-                sparse_blocks = list(dict.fromkeys(sparse_blocks))
-            
-            combinations = list(itertools.product(sparse_vision_tokens, sparse_top_k, sparse_blocks))
-            # Remove duplicate combinations
-            combinations = list(dict.fromkeys(combinations))
-            log.info(f"Stratified sampling: {len(combinations)} combinations")
-            return combinations
-        
-        elif sampling_strategy == "boundary":
-            # Boundary: min, 25%, 50%, 75%, max
-            # If list has only 1 value, use it directly to avoid duplicates
-            if len(vision_tokens_list) == 1:
-                sparse_vision_tokens = vision_tokens_list
-            else:
-                sparse_vision_tokens = [
-                    vision_tokens_list[0],
-                    vision_tokens_list[len(vision_tokens_list)//4],
-                    vision_tokens_list[len(vision_tokens_list)//2],
-                    vision_tokens_list[3*len(vision_tokens_list)//4],
-                    vision_tokens_list[-1]
-                ]
-                sparse_vision_tokens = list(dict.fromkeys(sparse_vision_tokens))
-            
-            if len(top_k_list) == 1:
-                sparse_top_k = top_k_list
-            else:
-                sparse_top_k = [
-                    top_k_list[0],
-                    top_k_list[len(top_k_list)//4],
-                    top_k_list[len(top_k_list)//2],
-                    top_k_list[3*len(top_k_list)//4],
-                    top_k_list[-1]
-                ]
-                sparse_top_k = list(dict.fromkeys(sparse_top_k))
-            
-            if len(num_active_blocks_list) == 1:
-                sparse_blocks = num_active_blocks_list
-            else:
-                sparse_blocks = [
-                    num_active_blocks_list[0],
-                    num_active_blocks_list[len(num_active_blocks_list)//4],
-                    num_active_blocks_list[len(num_active_blocks_list)//2],
-                    num_active_blocks_list[3*len(num_active_blocks_list)//4],
-                    num_active_blocks_list[-1]
-                ]
-                sparse_blocks = list(dict.fromkeys(sparse_blocks))
-            
-            combinations = list(itertools.product(sparse_vision_tokens, sparse_top_k, sparse_blocks))
-            # Remove duplicate combinations
-            combinations = list(dict.fromkeys(combinations))
-            log.info(f"Boundary sampling: {len(combinations)} combinations")
-            return combinations
-        
-        elif sampling_strategy == "lhs":
-            # Latin Hypercube Sampling
-            # Use fixed seed for reproducibility
-            rng = np.random.RandomState(seed=seed)
-            n_samples = min(max_combinations, len(vision_tokens_list) * len(top_k_list) * len(num_active_blocks_list) // 4)
-            
-            combinations = []
-            for _ in range(n_samples):
-                vision_tokens = rng.choice(vision_tokens_list)
-                top_k = rng.choice(top_k_list)
-                num_blocks = rng.choice(num_active_blocks_list)
-                combinations.append((vision_tokens, top_k, num_blocks))
-            
-            combinations = list(set(combinations))
-            log.info(f"Latin Hypercube Sampling: {len(combinations)} unique combinations (seed={seed})")
-            return combinations
-        
-        else:
-            raise ValueError(f"Unknown sampling strategy: {sampling_strategy}")
-    
     def _set_max_crops(self, max_crops: int):
         """Set max_crops in model config."""
         self.model.config.max_crops = max_crops
@@ -791,8 +549,7 @@ class CombinedProfilingExperiment(BaseExperiment):
         dataset_name: str = "coco_2014_vqa",
         split: str = "validation",
         max_new_tokens: int = 16,
-        vision_tokens_list: List[int] = None,
-        image_size_list: Optional[List[str]] = None,  # New: list of "HxW"
+        tier_list: List[str] = None,  # Required: list of tier names (e.g., ["low", "medium", "high"])
         top_k_list: List[int] = None,
         num_active_blocks_list: List[int] = None,
         sampling_strategy: str = "balanced",
@@ -806,10 +563,11 @@ class CombinedProfilingExperiment(BaseExperiment):
         resize_to_fill: bool = True,  # Upscale small images to fill target canvas before tiling
     ):
         """
-        Run combined profiling experiment.
+        Run combined profiling experiment using tier-based vision token control.
         
         Args:
-            vision_tokens_list: List of target vision token values (e.g., [288, 432, 576, 720, 1008, 1440, 1872])
+            tier_list: List of tier names (e.g., ["low", "medium", "high"]). Required.
+                      Available tiers: low (1-3 crops), medium (4-8 crops), high (9-15 crops)
             num_samples: Number of samples to use from dataset (None = use all)
                         Recommended: 1000-2000 for combined profiling
             num_runs_per_sample: Number of runs per sample for latency averaging (default: 3)
@@ -818,71 +576,34 @@ class CombinedProfilingExperiment(BaseExperiment):
                                          If False, only profile first sample (faster, default).
             profiler_activities: List of profiler activities (default: [ProfilerActivity.CUDA])
         """
-        # Default knob ranges (based on previous exp5/exp6 settings)
-        # Primary knob: vision_tokens_list (recommended) or image_size_list (legacy).
-        # If image_size_list is provided, it overrides vision_tokens_list.
+        # Validate tier_list (required)
+        if tier_list is None or len(tier_list) == 0:
+            raise ValueError("tier_list is required. Available tiers: low, medium, high")
+        
+        for tier_name in tier_list:
+            if tier_name not in VISION_TOKEN_TIERS:
+                raise ValueError(f"Unknown tier name: {tier_name}. Available tiers: {list(VISION_TOKEN_TIERS.keys())}")
+        
         # Store as instance variable for use in filename generation
-        self.image_size_list = image_size_list
-        if image_size_list:
-            # Parse image sizes and derive corresponding vision token targets
-            image_specs = []
-            for sz in image_size_list:
-                if isinstance(sz, str) and "x" in sz:
-                    h_str, w_str = sz.lower().split("x")
-                    target_h, target_w = int(h_str), int(w_str)
-                elif isinstance(sz, (list, tuple)) and len(sz) == 2:
-                    target_h, target_w = int(sz[0]), int(sz[1])
-                else:
-                    raise ValueError(f"Invalid image size format: {sz}. Use 'HxW', e.g., 560x336.")
-                rows, cols = image_size_to_tiling(target_h, target_w)
-                num_crops = rows * cols
-                target_tokens = (num_crops + 1) * 144  # theoretical tokens
-                image_specs.append({
-                    "target_h": target_h,
-                    "target_w": target_w,
-                    "rows": rows,
-                    "cols": cols,
-                    "num_crops": num_crops,
-                    "target_tokens": target_tokens,
-                })
-            # Deduplicate by (target_h, target_w)
-            unique_specs = []
-            seen = set()
-            for spec in image_specs:
-                key = (spec["target_h"], spec["target_w"])
-                if key not in seen:
-                    seen.add(key)
-                    unique_specs.append(spec)
-            image_specs = unique_specs
-            log.info(f"Using image_size_list (legacy knob): {[(s['target_h'], s['target_w']) for s in image_specs]}")
-            log.info("Note: vision_tokens_list is recommended for better aspect ratio handling")
-        else:
-            # Use vision_tokens_list (recommended knob)
-            if vision_tokens_list is None:
-                # Common vision token values based on vision_tokens_knob.md
-                # Corresponds to: 2, 4, 6, 8, 10 crops (max_crops=16 as upper limit)
-                vision_tokens_list = [432, 720, 1008, 1296, 1584]  # 2, 4, 6, 8, 10 crops
-            log.info(f"Using vision_tokens_list (recommended knob): {vision_tokens_list}")
-            log.info("Note: select_tiling will adapt to each image's aspect ratio for minimal distortion")
+        self.tier_list = tier_list
+        
+        log.info(f"Using tier-based vision token control: {tier_list}")
+        log.info("Note: select_tiling will adaptively select best crop count within each tier based on image aspect ratio")
+        log.info("      Each image will be processed with the tier's crop range, and actual crops/vision tokens will be recorded")
+        
         if top_k_list is None:
             top_k_list = [4, 8, 12]  # Based on previous experiments
         if num_active_blocks_list is None:
             num_active_blocks_list = [12, 13, 14, 15, 16]  # Based on previous experiments
         
-        # Generate combinations
-        if image_size_list:
-            # With explicit image sizes, use full product to keep mapping exact
-            combinations = []
-            for spec in image_specs:
-                for top_k in top_k_list:
-                    for num_active_blocks in num_active_blocks_list:
-                        combinations.append((spec, top_k, num_active_blocks))
-            log.info(f"Using image-size knob (legacy): {len(combinations)} combinations "
-                     f"(image_sizes x top_k x num_active_blocks)")
-        else:
-            combinations = self._generate_sparse_combinations(
-                vision_tokens_list, top_k_list, num_active_blocks_list, sampling_strategy, seed=self.seed
-            )
+        # Generate combinations: tier x top_k x num_active_blocks
+        combinations = []
+        for tier_name in tier_list:
+            tier = VISION_TOKEN_TIERS[tier_name]
+            for top_k in top_k_list:
+                for num_active_blocks in num_active_blocks_list:
+                    combinations.append((tier, top_k, num_active_blocks))
+        log.info(f"Testing {len(combinations)} configurations (tiers x top_k x num_active_blocks)")
         
         log.info(f"Testing {len(combinations)} configurations")
         log.info(f"Dataset: {dataset_name}/{split}")
@@ -923,43 +644,22 @@ class CombinedProfilingExperiment(BaseExperiment):
         
         # Process each configuration
         for config_idx, combo in enumerate(combinations):
-            if image_size_list:
-                spec, top_k, num_active_blocks = combo
-                target_vision_tokens = spec["target_tokens"]
-                num_crops = spec["num_crops"]
-                theoretical_tiling = (spec["rows"], spec["cols"])
-                theoretical_image_size = (spec["target_h"], spec["target_w"])
-            else:
-                target_vision_tokens, top_k, num_active_blocks = combo
-                num_crops = tokens_to_crops(target_vision_tokens)
-                theoretical_tiling = None  # will be computed later if needed
-                theoretical_image_size = None
+            # All configurations are tier-based
+            tier, top_k, num_active_blocks = combo
+            tier_name = tier["name"]
+            max_crops = tier["max_crops"]  # Use tier max_crops as upper bound
+            
             if self.rank == 0:
                 log.info(f"\n{'='*60}")
-                if image_size_list:
-                    log.info(f"Configuration {config_idx+1}/{len(combinations)}: "
-                             f"image_size={theoretical_image_size}, tiling={theoretical_tiling}, "
-                             f"target_vision_tokens={target_vision_tokens}, num_crops={num_crops}, "
-                             f"top_k={top_k}, num_active_blocks={num_active_blocks}")
-                else:
-                    log.info(f"Configuration {config_idx+1}/{len(combinations)}: "
-                             f"vision_tokens={target_vision_tokens}, num_crops={num_crops}, "
-                             f"top_k={top_k}, num_active_blocks={num_active_blocks}")
+                log.info(f"Configuration {config_idx+1}/{len(combinations)}: "
+                         f"tier={tier_name} (crops: {tier['min_crops']}-{tier['max_crops']}), "
+                         f"top_k={top_k}, num_active_blocks={num_active_blocks}")
                 log.info(f"{'='*60}")
             
             try:
-                if image_size_list:
-                    max_crops = num_crops
-                    log.info(f"Target image size: {theoretical_image_size}, tiling={theoretical_tiling}, "
-                             f"num_crops={num_crops}, max_crops={max_crops}, target_tokens={target_vision_tokens}")
-                else:
-                    # Convert vision tokens to num_crops (actual number of crops needed)
-                    num_crops = tokens_to_crops(target_vision_tokens)
-                    # Set max_crops to num_crops to ensure select_tiling selects exactly num_crops
-                    # Note: For very large images, select_tiling may still choose fewer crops if the image
-                    # doesn't need that many, but it won't exceed max_crops
-                    max_crops = num_crops
-                    log.info(f"Target vision tokens: {target_vision_tokens} → num_crops: {num_crops}, max_crops: {max_crops}")
+                log.info(f"Tier: {tier_name} (crops: {tier['min_crops']}-{tier['max_crops']}), "
+                         f"max_crops={max_crops}, preferred_crops={tier['preferred_crops']}")
+                log.info(f"Note: Actual crop count and vision tokens will be recorded per image")
                 
                 # Aggressive memory cleanup at start of each configuration on A100
                 if enable_memory_optimization and torch.cuda.is_available():
@@ -987,15 +687,14 @@ class CombinedProfilingExperiment(BaseExperiment):
                 self.block_mask_wrapper = BlockMaskWrapper(self.model.model, block_mask)
                 self.block_mask_wrapper.apply()
                 
-                # Build dataloader (batch_size=1 for accurate per-sample measurement)
-                # Set exact_num_crops to force select_tiling to use exactly num_crops
-                # This ensures actual_vision_tokens matches target_vision_tokens
+                # Build dataloader (always uses batch_size=1 for per-sample measurement)
                 force_full_tokens = False  # keep padding tokens invalid
+                
                 mm_preprocessor = MultiModalPreprocessor(
                     tokenizer=self.tokenizer,
                     crop_mode=self.model.config.crop_mode,
-                    max_crops=max_crops,
-                    exact_num_crops=num_crops,  # Force exact number of crops
+                    max_crops=max_crops,  # Upper bound for crop selection
+                    tier=tier,  # Tier configuration for adaptive crop selection
                     overlap_margins=self.model.config.overlap_margins,
                     image_padding_mask=bool(self.model.config.image_padding_embed),
                     force_full_tokens=force_full_tokens,  # Count padded patches as valid to match target tokens
@@ -1062,13 +761,13 @@ class CombinedProfilingExperiment(BaseExperiment):
                 
                 dataloader = torch.utils.data.DataLoader(
                     final_dataset,
-                    batch_size=1,  # Fixed batch_size=1 for accurate per-sample measurement
+                    batch_size=1,  # Always use batch_size=1 for per-sample measurement
                     shuffle=shuffle,
                     sampler=sampler,
                     collate_fn=MMCollator(
-                        max_sequence_length=1536,
+                        max_sequence_length=None,  # No truncation: use actual sequence length
                         include_metadata=True,
-                        pad=True,
+                        pad=False,  # No padding: use actual length for dynamic seq_len
                         max_crops=max_crops
                     ),
                     num_workers=num_workers,
@@ -1193,18 +892,8 @@ class CombinedProfilingExperiment(BaseExperiment):
                                     original_image_size = tuple(img_size)  # Keep as (width, height)
                         
                         # Calculate theoretical values (from target_vision_tokens or image size)
-                        if image_size_list and theoretical_image_size is not None:
-                            theoretical_values = {
-                                "theoretical_num_crops": num_crops,
-                                "theoretical_tiling": theoretical_tiling,
-                                "theoretical_image_size": theoretical_image_size,
-                                "theoretical_vision_tokens": target_vision_tokens,
-                            }
-                        else:
-                            theoretical_values = calculate_theoretical_values(
-                                target_vision_tokens=target_vision_tokens,
-                                original_image_size=original_image_size,
-                            )
+                        # Tier-based mode: no theoretical values (selection is per-image, varies by image)
+                        # We only record actual values (selected_crops, actual_vision_tokens)
                         
                         # Calculate actual values (from batch after preprocessing)
                         actual_values = calculate_actual_values(
@@ -1302,39 +991,41 @@ class CombinedProfilingExperiment(BaseExperiment):
                         # Extract prediction and groundtruth from batch_accuracy
                         pred_score = batch_accuracy["per_sample_scores"][0] if batch_accuracy["per_sample_scores"] else {}
                         # Note: metadata already contains question and answers, so we don't save them separately
-                        # Store per-sample result: record target_vision_tokens and target_crops (not target_image_size)
-                        sample_result = {
-                            "sample_id": batch_idx,
-                            "target_vision_tokens": target_vision_tokens,
-                            "target_crops": num_crops,  # Target number of crops (from target_vision_tokens)
-                            "actual_vision_tokens": actual_vision_tokens,
-                            "top_k": top_k,
-                            "num_active_blocks": num_active_blocks,
-                            "input_text_tokens": num_input_text_tokens,
-                            "output_tokens": num_output_tokens,
-                            # Theoretical values (from target_vision_tokens or image size)
-                            "theoretical_num_crops": theoretical_values["theoretical_num_crops"],
-                            "theoretical_tiling": theoretical_values["theoretical_tiling"],
-                            "theoretical_image_size": theoretical_values["theoretical_image_size"],
-                            "theoretical_vision_tokens": theoretical_values["theoretical_vision_tokens"],
-                            # Actual values (from batch after preprocessing)
-                            "actual_num_crops": actual_values["actual_num_crops"],
-                            "actual_tiling": actual_values["actual_tiling"],
-                            "actual_image_size": actual_values["actual_image_size"],
-                            # Accuracy and prediction details
-                            "accuracy": pred_score.get("score", 0.0),
-                            "pred": pred_score.get("pred", ""),  # Prediction text
-                            "metadata": pred_score.get("metadata", {}),  # Sample metadata (contains question, answers, image_id, etc.)
-                            # Stage latencies (ms)
-                            "T_vision_encoder": latency_results.get("T_vision_encoder", 0.0),
-                            "T_projector": latency_results.get("T_projector", 0.0),
-                            "T_vision_total": latency_results.get("T_vision_total", 0.0),
-                            "T_LLM_prefill": latency_results.get("T_LLM_prefill", 0.0),
-                            "T_LLM_decode": latency_results.get("T_LLM_decode", 0.0),
-                            "T_total": latency_results.get("T_total", 0.0),
-                            # Decode per token
-                            "T_decode_per_token": latency_results.get("T_LLM_decode", 0.0) / max(num_output_tokens, 1),
-                        }
+                        # Store per-sample result
+                        if tier_list:
+                            # Tier-based mode: record selected crops per image
+                            selected_crops = actual_values.get("actual_num_crops", 0)
+                            selected_vision_tokens = (selected_crops + 1) * 144 if selected_crops > 0 else 0
+                            sample_result = {
+                                "sample_id": batch_idx,
+                                "tier": tier_name,
+                                "tier_range": {"min_crops": tier["min_crops"], "max_crops": tier["max_crops"]},
+                                "selected_crops": selected_crops,  # Per-image selection
+                                "selected_vision_tokens": selected_vision_tokens,
+                                "actual_vision_tokens": actual_vision_tokens,
+                                "top_k": top_k,
+                                "num_active_blocks": num_active_blocks,
+                                "input_text_tokens": num_input_text_tokens,
+                                "output_tokens": num_output_tokens,
+                                "resize_to_fill": resize_to_fill,
+                                # Actual values (from batch after preprocessing)
+                                "actual_num_crops": actual_values["actual_num_crops"],
+                                "actual_tiling": actual_values["actual_tiling"],
+                                "actual_image_size": actual_values["actual_image_size"],
+                                # Accuracy and prediction details
+                                "accuracy": pred_score.get("score", 0.0),
+                                "pred": pred_score.get("pred", ""),  # Prediction text
+                                "metadata": pred_score.get("metadata", {}),  # Sample metadata (contains question, answers, image_id, etc.)
+                                # Stage latencies (ms)
+                                "T_vision_encoder": latency_results.get("T_vision_encoder", 0.0),
+                                "T_projector": latency_results.get("T_projector", 0.0),
+                                "T_vision_total": latency_results.get("T_vision_total", 0.0),
+                                "T_LLM_prefill": latency_results.get("T_LLM_prefill", 0.0),
+                                "T_LLM_decode": latency_results.get("T_LLM_decode", 0.0),
+                                "T_total": latency_results.get("T_total", 0.0),
+                                # Decode per token
+                                "T_decode_per_token": latency_results.get("T_LLM_decode", 0.0) / max(num_output_tokens, 1),
+                            }
                         
                         per_sample_results.append(sample_result)
                         num_processed += 1
@@ -1361,7 +1052,8 @@ class CombinedProfilingExperiment(BaseExperiment):
                                 log.warning(f"Error clearing memory for sample {batch_idx}: {e}")
                         
                     except Exception as e:
-                        log.error(f"Error processing sample {batch_idx}: {e}")
+                        # Log full stack to locate CPU-side index errors
+                        log.error(f"Error processing sample {batch_idx}: {e}", exc_info=True)
                         # Clear memory and reset CUDA state on error
                         # Always handle CUDA errors, but only aggressive cleanup on A100
                         if torch.cuda.is_available():
@@ -1410,10 +1102,15 @@ class CombinedProfilingExperiment(BaseExperiment):
                     aggregate_stats["vision_tokens_mean"] = float(np.mean(vision_token_values))
                     aggregate_stats["vision_tokens_std"] = float(np.std(vision_token_values))
                     
-                    # Theoretical vs actual comparison
-                    theoretical_vision_tokens_values = [s.get("theoretical_vision_tokens", target_vision_tokens) for s in per_sample_results]
-                    if theoretical_vision_tokens_values:
-                        aggregate_stats["theoretical_vision_tokens_mean"] = float(np.mean(theoretical_vision_tokens_values))
+                    # Selected crops statistics (per-image selection within tier)
+                    selected_crops_list = [s.get("selected_crops", 0) for s in per_sample_results]
+                    aggregate_stats["selected_crops_mean"] = float(np.mean(selected_crops_list)) if selected_crops_list else 0.0
+                    aggregate_stats["selected_crops_std"] = float(np.std(selected_crops_list)) if selected_crops_list else 0.0
+                    
+                    # Selected vision tokens statistics (theoretical for selected crops)
+                    selected_vision_tokens_list = [s.get("selected_vision_tokens", 0) for s in per_sample_results]
+                    aggregate_stats["selected_vision_tokens_mean"] = float(np.mean(selected_vision_tokens_list)) if selected_vision_tokens_list else 0.0
+                    aggregate_stats["selected_vision_tokens_std"] = float(np.std(selected_vision_tokens_list)) if selected_vision_tokens_list else 0.0
                     
                     # Actual num_crops statistics
                     actual_num_crops_values = [s.get("actual_num_crops", 0) for s in per_sample_results]
@@ -1421,55 +1118,31 @@ class CombinedProfilingExperiment(BaseExperiment):
                         aggregate_stats["actual_num_crops_mean"] = float(np.mean(actual_num_crops_values))
                         aggregate_stats["actual_num_crops_std"] = float(np.std(actual_num_crops_values))
                     
-                    # Theoretical num_crops (should be constant)
-                    theoretical_num_crops_values = [s.get("theoretical_num_crops", num_crops) for s in per_sample_results]
-                    if theoretical_num_crops_values:
-                        aggregate_stats["theoretical_num_crops_mean"] = float(np.mean(theoretical_num_crops_values))
+                    # Selected crops distribution (how many images selected each crop count)
+                    selected_crops_distribution = {}
+                    for crops in selected_crops_list:
+                        selected_crops_distribution[crops] = selected_crops_distribution.get(crops, 0) + 1
                     
-                    # Vision tokens mismatch statistics
-                    vision_tokens_diff = [
-                        s.get("theoretical_vision_tokens", target_vision_tokens) - s.get("actual_vision_tokens", 0)
-                        for s in per_sample_results
-                    ]
-                    if vision_tokens_diff:
-                        aggregate_stats["vision_tokens_diff_mean"] = float(np.mean(vision_tokens_diff))
-                        aggregate_stats["vision_tokens_diff_std"] = float(np.std(vision_tokens_diff))
-                        aggregate_stats["vision_tokens_diff_max"] = float(np.max(vision_tokens_diff))
-                        aggregate_stats["vision_tokens_diff_min"] = float(np.min(vision_tokens_diff))
-                    
-                    # Get theoretical values from first sample (should be consistent across samples)
-                    # But prefer loop-level values when using image_size_list (they're more reliable)
-                    first_sample = per_sample_results[0] if per_sample_results else {}
-                    
-                    # Determine theoretical_image_size: use loop-level value if available (from image_size_list),
-                    # otherwise fall back to first_sample
-                    if image_size_list and theoretical_image_size is not None:
-                        # Use the loop-level theoretical_image_size (set at config start)
-                        final_theoretical_image_size = theoretical_image_size
-                    else:
-                        # Fall back to first_sample (for vision_tokens_list mode)
-                        final_theoretical_image_size = first_sample.get("theoretical_image_size", None)
-                    
-                    # Store results
-                    # Record target_vision_tokens and target_crops (not target_image_size)
+                    # Store results: tier-based mode only
                     config_result = {
-                        "target_vision_tokens": target_vision_tokens,
-                        "target_crops": num_crops,  # Target number of crops (calculated from target_vision_tokens)
+                        "tier": tier_name,
+                        "tier_range": {"min_crops": tier["min_crops"], "max_crops": tier["max_crops"]},
+                        "selected_crops_distribution": selected_crops_distribution,
+                        "selected_crops_mean": aggregate_stats["selected_crops_mean"],
+                        "selected_crops_std": aggregate_stats["selected_crops_std"],
+                        "selected_vision_tokens_mean": aggregate_stats["selected_vision_tokens_mean"],
+                        "selected_vision_tokens_std": aggregate_stats["selected_vision_tokens_std"],
                         "actual_vision_tokens_mean": aggregate_stats.get("vision_tokens_mean", 0.0),
-                        "max_crops": max_crops,  # max_crops parameter passed to select_tiling (set to num_crops)
+                        "actual_vision_tokens_std": aggregate_stats.get("vision_tokens_std", 0.0),
+                        "max_crops": max_crops,  # max_crops parameter passed to select_tiling
                         "top_k": top_k,
                         "num_active_blocks": num_active_blocks,
                         "num_total_blocks": total_blocks,
                         "active_block_indices": block_indices,
-                        "resize_to_fill": resize_to_fill,  # Whether small images are upscaled to fill target canvas
+                        "resize_to_fill": resize_to_fill,
                         "accuracy": accuracy_mean,
                         "accuracy_std": accuracy_std,
                         "num_samples": num_processed,
-                        # Theoretical values (from target_vision_tokens or image_size, should be consistent across samples)
-                        "theoretical_num_crops": first_sample.get("theoretical_num_crops", num_crops) if not image_size_list else num_crops,
-                        "theoretical_tiling": first_sample.get("theoretical_tiling", theoretical_tiling) if not image_size_list else theoretical_tiling,
-                        "theoretical_image_size": final_theoretical_image_size,
-                        "theoretical_vision_tokens": first_sample.get("theoretical_vision_tokens", target_vision_tokens),
                         # Aggregate statistics (includes actual values statistics)
                         "aggregate_stats": aggregate_stats,
                         "per_sample_results": per_sample_results,  # Store all samples (will be merged across ranks)
@@ -1480,7 +1153,7 @@ class CombinedProfilingExperiment(BaseExperiment):
                     # Save intermediate results (each rank saves its own results for fault tolerance)
                     # These will be merged later and the rank-specific files will be deleted
                     # Generate descriptive filename with control knob info
-                    base_filename = _generate_config_filename(config_result, self.dataset_name, use_image_size_list=bool(image_size_list))
+                    base_filename = _generate_config_filename(config_result, self.dataset_name, use_tier=True)
                     if self.is_distributed:
                         # For rank-specific files, add rank suffix before .json
                         base_name = base_filename.replace(".json", "")
@@ -1585,13 +1258,13 @@ class CombinedProfilingExperiment(BaseExperiment):
                     dist.gather_object(results, gathered_results, dst=0)
                     
                     # Merge results from all ranks
-                    # Group by config (vision_tokens, top_k, num_active_blocks)
+                    # Group by config (tier, top_k, num_active_blocks)
                     config_dict = {}
                     for rank_results in gathered_results:
                         if rank_results is not None:
                             for config_result in rank_results:
                                 config_key = (
-                                    config_result.get("target_vision_tokens"),
+                                    config_result.get("tier"),
                                     config_result.get("top_k"),
                                     config_result.get("num_active_blocks")
                                 )
@@ -1612,7 +1285,7 @@ class CombinedProfilingExperiment(BaseExperiment):
                         if rank_results is not None:
                             for orig_config_idx, config_result in enumerate(rank_results):
                                 config_key = (
-                                    config_result.get("target_vision_tokens"),
+                                    config_result.get("tier"),
                                     config_result.get("top_k"),
                                     config_result.get("num_active_blocks")
                                 )
@@ -1647,6 +1320,28 @@ class CombinedProfilingExperiment(BaseExperiment):
                             aggregate_stats["vision_tokens_mean"] = float(np.mean(vision_token_values))
                             aggregate_stats["vision_tokens_std"] = float(np.std(vision_token_values))
                             
+                            # Selected crops statistics (per-image selection within tier)
+                            selected_crops_list = [s.get("selected_crops", 0) for s in all_per_sample]
+                            aggregate_stats["selected_crops_mean"] = float(np.mean(selected_crops_list)) if selected_crops_list else 0.0
+                            aggregate_stats["selected_crops_std"] = float(np.std(selected_crops_list)) if selected_crops_list else 0.0
+                            
+                            # Selected vision tokens statistics (theoretical for selected crops)
+                            selected_vision_tokens_list = [s.get("selected_vision_tokens", 0) for s in all_per_sample]
+                            aggregate_stats["selected_vision_tokens_mean"] = float(np.mean(selected_vision_tokens_list)) if selected_vision_tokens_list else 0.0
+                            aggregate_stats["selected_vision_tokens_std"] = float(np.std(selected_vision_tokens_list)) if selected_vision_tokens_list else 0.0
+                            
+                            # Update config_result with tier-specific statistics
+                            selected_crops_distribution = {}
+                            for crops in selected_crops_list:
+                                selected_crops_distribution[crops] = selected_crops_distribution.get(crops, 0) + 1
+                            config_result["selected_crops_distribution"] = selected_crops_distribution
+                            config_result["selected_crops_mean"] = aggregate_stats["selected_crops_mean"]
+                            config_result["selected_crops_std"] = aggregate_stats["selected_crops_std"]
+                            config_result["selected_vision_tokens_mean"] = aggregate_stats["selected_vision_tokens_mean"]
+                            config_result["selected_vision_tokens_std"] = aggregate_stats["selected_vision_tokens_std"]
+                            config_result["actual_vision_tokens_mean"] = aggregate_stats["vision_tokens_mean"]
+                            config_result["actual_vision_tokens_std"] = aggregate_stats["vision_tokens_std"]
+                            
                             config_result["aggregate_stats"] = aggregate_stats
                             # Store all per_sample_results
                             config_result["per_sample_results"] = all_per_sample
@@ -1655,9 +1350,12 @@ class CombinedProfilingExperiment(BaseExperiment):
                         
                         # Save merged result for this config (one file per config, all ranks merged)
                         # Use descriptive filename with control knob info
-                        # Use instance variable to determine mode
-                        use_img_size_mode = bool(self.image_size_list) if hasattr(self, 'image_size_list') else False
-                        output_file = Path(self.output_dir) / _generate_config_filename(config_result, self.dataset_name, use_image_size_list=use_img_size_mode)
+                        # Generate filename with tier info
+                        output_file = Path(self.output_dir) / _generate_config_filename(
+                            config_result, 
+                            self.dataset_name, 
+                            use_tier=True
+                        )
                         with open(output_file, 'w') as f:
                             json.dump(config_result, f, indent=2)
                         log.info(f"Saved merged results to {output_file} (merged from {self.world_size} ranks, {len(all_per_sample)} samples)")
@@ -1678,11 +1376,9 @@ class CombinedProfilingExperiment(BaseExperiment):
             log.info(f"Experiment completed! Results saved:")
             
             # List all saved config files (exclude rank-specific intermediate files)
-            # Match files with pattern: <task_name>_imgsize*_topk*_blocks*.json or <task_name>_visiontoken*_topk*_blocks*.json
-            # (works for both image_size_list mode: imgsize<H>x<W> and vision_tokens_list mode: visiontoken<T>)
+            # Match files with pattern: <task_name>_imgsizetier-*_topk*_blocks*.json
             task_name_pattern = self.dataset_name.replace("_", "-")
-            config_files = sorted(glob.glob(str(Path(self.output_dir) / f"{task_name_pattern}_imgsize*_topk*_blocks*.json")) + 
-                                  glob.glob(str(Path(self.output_dir) / f"{task_name_pattern}_visiontoken*_topk*_blocks*.json")))
+            config_files = sorted(glob.glob(str(Path(self.output_dir) / f"{task_name_pattern}_imgsizetier-*_topk*_blocks*.json")))
             config_files = [f for f in config_files if "_rank" not in Path(f).name]
             for f in config_files:
                 log.info(f"  - {Path(f).name}")
@@ -1690,10 +1386,8 @@ class CombinedProfilingExperiment(BaseExperiment):
             # Clean up intermediate rank-specific files (only in distributed mode)
             if self.is_distributed:
                 task_name_pattern = self.dataset_name.replace("_", "-")
-                intermediate_pattern = str(Path(self.output_dir) / f"{task_name_pattern}_imgsize*_topk*_blocks*_rank*.json")
+                intermediate_pattern = str(Path(self.output_dir) / f"{task_name_pattern}_imgsizetier-*_topk*_blocks*_rank*.json")
                 intermediate_files = glob.glob(intermediate_pattern)
-                # Also match visiontoken pattern
-                intermediate_files.extend(glob.glob(str(Path(self.output_dir) / f"{task_name_pattern}_visiontoken*_topk*_blocks*_rank*.json")))
                 if intermediate_files:
                     log.info(f"\nCleaning up {len(intermediate_files)} intermediate rank files...")
                     deleted_count = 0
@@ -1705,8 +1399,9 @@ class CombinedProfilingExperiment(BaseExperiment):
                             log.warning(f"Failed to delete {f}: {e}")
                     log.info(f"Deleted {deleted_count}/{len(intermediate_files)} intermediate files.")
             
-            log.info(f"Each configuration saved in separate file: <task_name>_imgsize<H>x<W>_topk<k>_blocks<n>.json")
-            log.info(f"  (or <task_name>_visiontoken<T>_topk<k>_blocks<n>.json for vision_tokens_list mode)")
+            log.info(f"Each configuration saved in separate file:")
+            log.info(f"  Format: <task_name>_imgsizetier-<tier>_crops<mean>_topk<k>_blocks<n>.json")
+            log.info(f"  Each file contains: tier info, selected_crops distribution, actual_vision_tokens statistics")
             log.info(f"{'='*60}")
 
 
@@ -1717,13 +1412,9 @@ def main():
     parser.add_argument("--dataset_name", type=str, default="coco_2014_vqa", help="Dataset name")
     parser.add_argument("--split", type=str, default="validation", help="Dataset split")
     parser.add_argument("--max_new_tokens", type=int, default=16, help="Max new tokens")
-    parser.add_argument("--vision_tokens_list", type=int, nargs="+", default=None, 
-                       help="List of target vision token values (recommended knob; allows adaptive tiling per image). "
-                            "Examples: 432 720 1008 1440 (corresponds to 2, 4, 6, 9 crops).")
-    parser.add_argument("--image_size_list", type=str, nargs="+", default=None,
-                       help="List of target image sizes (HxW, e.g., 560x336 560x784 784x784). "
-                            "Legacy knob; overrides vision_tokens_list if provided. "
-                            "Note: vision_tokens_list is recommended for better aspect ratio handling.")
+    parser.add_argument("--tier_list", type=str, nargs="+", required=True,
+                       help="List of tier names (required). Available tiers: low, medium, high. "
+                            "Examples: --tier_list low medium high")
     parser.add_argument("--resize_to_fill", action="store_true",
                        help="If set, upscale small images to fill the target canvas (rows*224+112, cols*224+112) "
                             "before tiling. This helps small images fully use the target vision token budget. "
@@ -1770,7 +1461,7 @@ def main():
         dataset_name=args.dataset_name,
         split=args.split,
         max_new_tokens=args.max_new_tokens,
-        vision_tokens_list=args.vision_tokens_list,
+        tier_list=args.tier_list,
         top_k_list=args.top_k_list,
         num_active_blocks_list=args.num_active_blocks_list,
         sampling_strategy=args.sampling_strategy,

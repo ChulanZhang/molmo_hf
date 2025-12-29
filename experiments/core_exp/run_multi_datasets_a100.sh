@@ -40,17 +40,14 @@ else
 fi
 NUM_GPUS="${NUM_GPUS_OVERRIDE:-${NUM_GPUS}}"
 
-# Primary knob: vision tokens (target). select_tiling will automatically choose the best tiling
-# based on each image's aspect ratio, ensuring minimal distortion.
-# Vision tokens → num_crops → adaptive tiling selection per image
-# Recommended values:
-#   432 tokens  -> 2 crops  (small images)
-#   720 tokens  -> 4 crops  (medium images)
-#   1008 tokens -> 6 crops  (large images)
-#   1440 tokens -> 9 crops  (very large images)
-# Note: Using vision_tokens_list allows select_tiling to adapt to each image's aspect ratio,
-#       avoiding the aspect ratio mismatch issues with fixed image_size_list.
-VISION_TOKENS_LIST="${VISION_TOKENS_LIST:-432 720 1008 1440}"
+# Primary knob: tier-based vision token control
+# Tier-based: select_tiling adaptively chooses best crop count within tier range
+#   based on each image's aspect ratio, ensuring minimal distortion.
+# Available tiers:
+#   low:    1-3 crops   (small images, simple tasks)
+#   medium: 4-8 crops   (medium images, standard tasks)
+#   high:   9-15 crops   (large images, complex tasks)
+TIER_LIST="${TIER_LIST:-low medium high}"  # Required: list of tier names
 TOP_K_LIST="${TOP_K_LIST:-4 8 12}"
 NUM_ACTIVE_BLOCKS_LIST="${NUM_ACTIVE_BLOCKS_LIST:-12 14 16}"
 # Control whether to upscale small images to fill target canvas before tiling
@@ -90,11 +87,12 @@ run_combined_profiling() {
     echo "Dataset: ${dataset_name}"
     echo "Split: ${split}"
     echo "Output dir: ${output_dir} (will be adjusted to include dataset name)"
-    echo "Batch size: 1 (FIXED for accurate per-sample measurement)"
+    echo "Batch size: 1 (always used for per-sample measurement)"
+    echo "Sequence length: Dynamic (uses actual length per sample, no padding/truncation)"
     echo "Num samples: ${NUM_SAMPLES} (total across all ranks)"
     echo "Max new tokens: ${max_new_tokens} (upper limit, EOS token will stop early)"
     echo "Number of GPUs: ${NUM_GPUS}"
-    echo "Vision tokens: ${VISION_TOKENS_LIST}"
+    echo "Tiers: ${TIER_LIST}"
     echo "Top K: ${TOP_K_LIST}"
     echo "Active blocks: ${NUM_ACTIVE_BLOCKS_LIST}"
     echo ""
@@ -124,7 +122,7 @@ run_combined_profiling() {
         --dataset_name "${dataset_name}" \
         --split "${split}" \
         --max_new_tokens "${max_new_tokens}" \
-        --vision_tokens_list ${VISION_TOKENS_LIST} \
+        --tier_list ${TIER_LIST} \
         --top_k_list ${TOP_K_LIST} \
         --num_active_blocks_list ${NUM_ACTIVE_BLOCKS_LIST} \
         --sampling_strategy "${SAMPLING_STRATEGY}" \
@@ -146,19 +144,21 @@ echo "Multi-Dataset Combined Profiling"
 echo "=========================================="
 echo "Model path: ${MODEL_PATH}"
 echo "Base output dir: ${BASE_OUTPUT_DIR}"
-echo "Batch size: 1 (FIXED for accurate per-sample measurement)"
+echo "Batch size: 1 (always used for per-sample measurement)"
+echo "Sequence length: Dynamic (uses actual length per sample, no padding/truncation)"
 echo "Num samples: ${NUM_SAMPLES}"
 echo "Sampling strategy: ${SAMPLING_STRATEGY}"
 echo "Number of GPUs: ${NUM_GPUS} (auto-detected, override with NUM_GPUS_OVERRIDE)"
 echo ""
 echo "Knob ranges:"
-echo "  Vision tokens: ${VISION_TOKENS_LIST}"
+echo "  Tiers: ${TIER_LIST}"
 echo "  Top K: ${TOP_K_LIST}"
 echo "  Active blocks: ${NUM_ACTIVE_BLOCKS_LIST}"
 echo "  Resize to fill: ${RESIZE_TO_FILL}"
 echo ""
-echo "Note: Using vision_tokens_list allows select_tiling to adapt to each image's aspect ratio"
-echo "      for minimal distortion. Results will be saved in dataset-specific subdirectories"
+echo "Note: Using tier-based control allows select_tiling to adaptively select best crop count"
+echo "      within each tier range based on image aspect ratio. Actual crops and vision tokens"
+echo "      are recorded per image in the experiment results."
 echo "=========================================="
 echo ""
 
