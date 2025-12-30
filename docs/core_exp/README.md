@@ -8,6 +8,16 @@ The experiments are organized into two categories:
 - **Macro Experiments (E1-E6)**: Main results and system evaluation
 - **Micro Experiments (M1-M6)**: Supporting findings and sanity checks
 
+## Dataset Information
+
+### Dataset Sample Counts
+**Document**: `dataset_sample_counts.md`
+
+Complete list of sample counts for all 9 datasets used in experiments:
+- coco_2014_vqa, coco_caption, tally_qa, doc_qa, okvqa, text_vqa, science_qa_img, st_qa, mmmu
+
+Includes recommendations for `num_samples` configuration based on dataset sizes.
+
 ## Macro Experiments
 
 ### E1: Stage-Aware Latency Decomposition

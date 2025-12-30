@@ -673,7 +673,6 @@ For detailed examples with real images from VQA v2 dataset, see:
 - `vision_tokens_knob_qa.md`: Q&A on naming and tier-based design
 - `vision_tokens_knob_tier_design_discussion.md`: Detailed discussion on tier-based design
 - `vision_tokens_knob_tier_design_summary.md`: Quick summary of tier-based design options
-- `../core_exp/vision_tokens_list_vs_image_size_list.md`: Detailed comparison
+- Vision tokens approach vs image size approach: See "Key Innovation" section above
 - `moe_topk_knob.md`: MoE top-K control knob
 - `transformer_blocks_knob.md`: Transformer blocks control knob
-- `../core_exp/migration_to_vision_tokens_list.md`: Migration guide

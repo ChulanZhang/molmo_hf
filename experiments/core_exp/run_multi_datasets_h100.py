@@ -181,7 +181,7 @@ def main():
     base_output_dir = "./results/core_exp_h100"
     
     # Sampling configuration
-    num_samples = 36
+    num_samples = 2000
     sampling_strategy = "balanced"
     num_runs_per_sample = 1
     

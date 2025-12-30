@@ -2,7 +2,6 @@
 
 This directory contains comprehensive documentation organized by content type. All documents have been unified in English and consolidated around three main control knobs.
 
-**📋 Migration Summary**: See [deprecated/MIGRATION_SUMMARY.md](./deprecated/MIGRATION_SUMMARY.md) for complete reorganization details (archived).
 
 ## Directory Structure
 
@@ -29,8 +28,6 @@ docs/
 │   ├── coco_caption_evaluation.md     # COCO Caption evaluation guide
 │   ├── e1-e6_*.md                     # Macro experiments (main results)
 │   └── m1-m6_*.md                     # Micro experiments (supporting findings)
-├── development/                        # Development and refactoring
-└── deprecated/                         # Archived old documents
 ```
 
 ## Documentation Categories
@@ -57,34 +54,6 @@ Complete documentation for the three main control knobs, unified in English with
   - Tier-based design vs fixed targets discussion
   - Recommendations for immediate and long-term improvements
 
-- **vision_tokens_knob_tier_design_discussion.md** - Tier-Based Design Discussion
-  - Detailed analysis of tier-based approach
-  - Comparison with fixed targets
-  - Implementation considerations
-  - Open questions and recommendations
-
-- **vision_tokens_knob_tier_design_summary.md** - Tier-Based Design Summary
-  - Quick reference for tier-based design options
-  - Comparison table
-  - Immediate recommendations
-
-- **vision_tokens_knob_hybrid_tier_analysis.md** - Hybrid Tier Approach Deep Analysis
-  - Detailed analysis of hybrid tier approach
-  - Goal 1: No image distortion (aspect ratio preservation)
-  - Goal 2: Accuracy benefits from more vision tokens
-  - Integration with select_tiling
-  - Real-world examples with calculations
-
-- **vision_tokens_knob_hybrid_tier_implementation.md** - Hybrid Tier Implementation Guide
-  - Step-by-step implementation guide
-  - Code examples and integration patterns
-  - Result recording format
-  - Validation strategies
-
-- **vision_tokens_knob_tier_implementation_summary.md** - Tier Implementation Summary
-  - Implementation details of tier-based approach in `select_tiling`
-  - API changes and migration path
-  - Usage examples and testing
 
 - **moe_topk_knob.md** - MoE Top-K Control Knob
   - Dynamic MoE top-K adjustment methods
@@ -166,7 +135,6 @@ Documents for code refactoring, optimization, and development plans.
 👉 See `knobs/` directory (**Recommended, latest and most complete**)
 - Vision tokens control → `knobs/vision_tokens_knob.md`
   - Real-world examples → `knobs/vision_tokens_knob_examples.md`
-  - Comparison with image_size_list → `core_exp/vision_tokens_list_vs_image_size_list.md`
 - MoE top-K control → `knobs/moe_topk_knob.md`
 - Transformer blocks control → `knobs/transformer_blocks_knob.md`
 - Quick reference → `knobs/README.md`
@@ -201,10 +169,6 @@ Documents for code refactoring, optimization, and development plans.
 - Training comparison → `core_exp/e5_training_strategy_comparison.md`
 - Ablations → `core_exp/e6_ablations_portability.md`
 
-### I Want to Contribute to Development
-👉 See `development/` directory
-- Code reorganization plan → `development/code_reorganization_plan.md`
-- Code analysis summary → `development/profiling_code_analysis_summary.md`
 
 ## Documentation Updates
 
@@ -402,9 +366,4 @@ When updating documentation:
 4. **Version control**: Use clear commit messages describing changes
 5. **Review**: Ensure examples are accurate and code references are correct
 
-### Migration
-
-For information about deprecated documents and migration paths, see:
-- `deprecated/README.md` - Migration guide for deprecated documents
-- `deprecated/MIGRATION_SUMMARY.md` - Complete reorganization summary (archived)
 

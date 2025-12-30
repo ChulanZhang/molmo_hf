@@ -202,7 +202,7 @@ def main():
     # Sampling configuration (reduced for A100 memory constraints)
     num_samples = 1000
     sampling_strategy = "balanced"
-    num_runs_per_sample = 3
+    num_runs_per_sample = 1
     
     # Tier-based vision token control (A100 defaults: more tiers for comprehensive profiling)
     tier_list = ["low", "medium", "high"]  # Available: "low", "medium", "high"

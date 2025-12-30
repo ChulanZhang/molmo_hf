@@ -34,7 +34,7 @@ Controls the number of vision tokens by managing:
 
 **See also**:
 - `vision_tokens_knob_examples.md`: Real-world examples with actual images from VQA v2 dataset
-- `../core_exp/vision_tokens_list_vs_image_size_list.md`: Detailed comparison of two approaches
+- Vision tokens approach vs image size approach: See "Key innovation" in `vision_tokens_knob.md`
 
 ### 2. MoE Top-K Knob
 
