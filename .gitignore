@@ -26,3 +26,6 @@ EOF
 
 # pictures
 *.png
+
+# lock files
+*.lock

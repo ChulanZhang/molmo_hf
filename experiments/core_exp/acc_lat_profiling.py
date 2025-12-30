@@ -256,6 +256,51 @@ def crops_to_max_crops(num_crops: int) -> int:
     return num_crops
 
 
+def _is_retryable_config_error(error: Exception) -> bool:
+    """Check if an error is retryable at configuration level"""
+    error_str = str(error)
+    error_type = type(error).__name__
+    
+    # Non-retryable errors (configuration/code issues)
+    non_retryable_types = [
+        'AttributeError',
+        'TypeError',
+        'ValueError',
+        'KeyError',
+        'ImportError',
+        'ModuleNotFoundError',
+        'AssertionError',
+    ]
+    if error_type in non_retryable_types:
+        return False
+    
+    # Non-retryable error messages
+    non_retryable_patterns = [
+        'not found',
+        'does not exist',
+        'invalid',
+        'must be',
+        'required',
+    ]
+    for pattern in non_retryable_patterns:
+        if pattern.lower() in error_str.lower():
+            return False
+    
+    # Retryable errors (transient issues)
+    retryable_patterns = [
+        'CUDA error',
+        'out of memory',
+        'device-side assert',
+        'cuda runtime error',
+    ]
+    for pattern in retryable_patterns:
+        if pattern.lower() in error_str.lower():
+            return True
+    
+    # Default: retry for RuntimeError and other exceptions (conservative)
+    return isinstance(error, RuntimeError) or error_type not in non_retryable_types
+
+
 def _generate_config_filename(config_result: Dict[str, Any], dataset_name: str, use_tier: bool = True) -> str:
     """
     Generate a descriptive filename for a configuration result.
@@ -528,6 +573,8 @@ class CombinedProfilingExperiment(BaseExperiment):
         use_profiler_on_all_samples: bool = False,  # If True, profile all samples; if False, only first sample
         profiler_activities: Optional[List] = None,
         enable_memory_optimization: bool = False,  # Enable memory optimizations for limited GPU memory
+        max_config_retries: int = 3,  # Maximum retries per configuration on error
+        config_retry_delay: int = 5,  # Delay between retries (seconds)
     ):
         """
         Run combined profiling experiment using tier-based vision token control.
@@ -565,7 +612,7 @@ class CombinedProfilingExperiment(BaseExperiment):
             log_config_info("Samples", f"{num_samples if num_samples else 'all'}")
         
         if top_k_list is None:
-            top_k_list = [4, 8, 12]  # Based on previous experiments
+            top_k_list = [4, 6, 8]  # Based on previous experiments
         if num_active_blocks_list is None:
             num_active_blocks_list = [12, 13, 14, 15, 16]  # Based on previous experiments
         
@@ -625,39 +672,42 @@ class CombinedProfilingExperiment(BaseExperiment):
                          f"{Colors.BRIGHT_YELLOW}top_k={top_k}{Colors.RESET}, "
                          f"{Colors.BRIGHT_YELLOW}blocks={num_active_blocks}{Colors.RESET}")
             
-            try:
-                # Configuration details are already logged above, skip redundant tier info
-                
-                # Aggressive memory cleanup at start of each configuration on A100
-                if enable_memory_optimization and torch.cuda.is_available():
-                    torch.cuda.synchronize()
-                    torch.cuda.empty_cache()
-                    # Force garbage collection to free Python objects
-                    import gc
-                    gc.collect()
-                    torch.cuda.empty_cache()
-                
-                # Set configuration
-                self._set_max_crops(max_crops)
-                self._set_top_k(top_k)
-                
-                # Set active blocks
-                total_blocks = len(self.model.model.transformer.blocks) if hasattr(self.model.model.transformer, 'blocks') else 24
-                block_mask, block_indices = self._set_active_blocks_importance_based(
-                    num_active_blocks, total_blocks, importance_scores
-                )
-                
-                # Apply block mask
-                # Note: BlockMaskWrapper expects MolmoModel (self.model.model), not MolmoForCausalLM (self.model)
-                if self.block_mask_wrapper is not None:
-                    self.block_mask_wrapper.remove()
-                self.block_mask_wrapper = BlockMaskWrapper(self.model.model, block_mask)
-                self.block_mask_wrapper.apply()
+            # Retry loop for configuration
+            config_success = False
+            for retry_attempt in range(max_config_retries):
+                try:
+                    # Configuration details are already logged above, skip redundant tier info
+                    
+                    # Aggressive memory cleanup at start of each configuration on A100
+                    if enable_memory_optimization and torch.cuda.is_available():
+                        torch.cuda.synchronize()
+                        torch.cuda.empty_cache()
+                        # Force garbage collection to free Python objects
+                        import gc
+                        gc.collect()
+                        torch.cuda.empty_cache()
+                    
+                    # Set configuration
+                    self._set_max_crops(max_crops)
+                    self._set_top_k(top_k)
+                    
+                    # Set active blocks
+                    total_blocks = len(self.model.model.transformer.blocks) if hasattr(self.model.model.transformer, 'blocks') else 24
+                    block_mask, block_indices = self._set_active_blocks_importance_based(
+                        num_active_blocks, total_blocks, importance_scores
+                    )
+                    
+                    # Apply block mask
+                    # Note: BlockMaskWrapper expects MolmoModel (self.model.model), not MolmoForCausalLM (self.model)
+                    if self.block_mask_wrapper is not None:
+                        self.block_mask_wrapper.remove()
+                    self.block_mask_wrapper = BlockMaskWrapper(self.model.model, block_mask)
+                    self.block_mask_wrapper.apply()
                 
                 # Build dataloader (always uses batch_size=1 for per-sample measurement)
-                force_full_tokens = False  # keep padding tokens invalid
+                    force_full_tokens = False  # keep padding tokens invalid
                 
-                mm_preprocessor = MultiModalPreprocessor(
+                    mm_preprocessor = MultiModalPreprocessor(
                     tokenizer=self.tokenizer,
                     crop_mode=self.model.config.crop_mode,
                     max_crops=max_crops,  # Upper bound for crop selection
@@ -665,334 +715,348 @@ class CombinedProfilingExperiment(BaseExperiment):
                     overlap_margins=self.model.config.overlap_margins,
                     image_padding_mask=bool(self.model.config.image_padding_embed),
                     force_full_tokens=force_full_tokens,  # Count padded patches as valid to match target tokens
-                )
+                    )
                 
-                formatter = DataFormatter(
+                    formatter = DataFormatter(
                     prompt_templates=self.model.config.prompt_type,
                     message_format=self.model.config.message_formatting,
                     system_prompt=self.model.config.system_prompt_kind,
                     always_start_with_space=self.model.config.always_start_with_space,
-                )
+                    )
                 
-                preprocessor = Preprocessor(
+                    preprocessor = Preprocessor(
                     formater=formatter,
                     mm_preprocessor=mm_preprocessor,
                     for_inference=True,
-                )
-                
-                det_dataset = DeterministicDataset(dataset, preprocessor, seed=self.seed)
-                
-                # Apply sampling if specified
-                # Note: We sample after DeterministicDataset to ensure consistent sampling
-                # across configurations (same seed)
-                if num_samples is not None and num_samples < len(det_dataset):
-                    # Create sampled dataset
-                    rng = np.random.RandomState(seed=self.seed)  # Fixed seed for reproducibility
-                    all_indices = list(range(len(det_dataset)))
-                    sampled_indices = rng.choice(all_indices, size=num_samples, replace=False)
-                    sampled_indices = sorted(sampled_indices.tolist())  # Sort for reproducibility
-                    sampled_dataset = Subset(det_dataset, sampled_indices)
-                    # Only log sampling info once per configuration (not per tier)
-                    if self.rank == 0 and config_idx == 0:
-                        log.info(f"Sampled {num_samples} samples from {len(det_dataset)} total (seed={self.seed})")
-                    final_dataset = sampled_dataset
-                else:
-                    final_dataset = det_dataset
-                
-                if self.is_distributed:
-                    sampler = DistributedSampler(
-                        final_dataset,
-                        num_replicas=self.world_size,
-                        rank=self.rank,
-                        shuffle=False,
-                        seed=self.seed,  # Use consistent seed for reproducibility
                     )
-                    shuffle = False
-                else:
-                    sampler = None
-                    shuffle = False
                 
-                # Memory-optimized dataloader settings for A100-40GB
-                # Only apply optimizations if explicitly enabled (auto-enabled on A100)
-                # Use environment variables if set, otherwise use defaults
-                if enable_memory_optimization:
-                    num_workers = int(os.environ.get("DATALOADER_NUM_WORKERS", 2))  # Reduced for A100
-                    prefetch_factor = int(os.environ.get("DATALOADER_PREFETCH_FACTOR", 1))  # Reduced for A100
-                    pin_memory = False  # Disable pin_memory to save memory on A100
-                    persistent_workers = False  # Disable to avoid worker state issues on A100
-                else:
-                    # Default settings for H100 (no optimization)
-                    num_workers = int(os.environ.get("DATALOADER_NUM_WORKERS", 4))
-                    prefetch_factor = int(os.environ.get("DATALOADER_PREFETCH_FACTOR", 2))
-                    pin_memory = True  # Enable pin_memory for better performance on H100
-                    persistent_workers = (num_workers > 0)  # Enable for H100
+                    det_dataset = DeterministicDataset(dataset, preprocessor, seed=self.seed)
                 
-                dataloader = torch.utils.data.DataLoader(
-                    final_dataset,
-                    batch_size=1,  # Always use batch_size=1 for per-sample measurement
-                    shuffle=shuffle,
-                    sampler=sampler,
-                    collate_fn=MMCollator(
-                        max_sequence_length=None,  # No truncation: use actual sequence length
-                        include_metadata=True,
-                        pad=False,  # No padding: use actual length for dynamic seq_len
-                        max_crops=max_crops
-                    ),
-                    num_workers=num_workers,
-                    pin_memory=pin_memory,
-                    prefetch_factor=prefetch_factor,
-                    persistent_workers=persistent_workers,
-                )
-                
-                # Collect results
-                all_scores = []
-                all_predictions = []
-                per_sample_results = []
-                
-                # Get metric
-                metric_name = get_metric_for_dataset(dataset_name)
-                
-                # Process samples
-                num_processed = 0
-                # In distributed mode, each rank processes its share
-                # The sampler already handles distribution, so we process all samples from this rank's dataloader
-                # If num_samples was specified, the dataset was already sampled, so we process all
-                max_samples_per_rank = None  # Process all samples from this rank's dataloader
-                
-                # Aggressive memory cleanup before warmup on A100
-                if enable_memory_optimization and torch.cuda.is_available():
-                    torch.cuda.synchronize()
-                    torch.cuda.empty_cache()
-                    import gc
-                    gc.collect()
-                    torch.cuda.empty_cache()
-                
-                # Warmup
-                if len(dataloader) > 0:
-                    try:
-                        warmup_batch = next(iter(dataloader))
-                        # Move to device with error handling
+                    # Apply sampling if specified
+                    # Note: We sample after DeterministicDataset to ensure consistent sampling
+                    # across configurations (same seed)
+                    if num_samples is not None and num_samples < len(det_dataset):
+                        # Create sampled dataset
+                        rng = np.random.RandomState(seed=self.seed)  # Fixed seed for reproducibility
+                        all_indices = list(range(len(det_dataset)))
+                        sampled_indices = rng.choice(all_indices, size=num_samples, replace=False)
+                        sampled_indices = sorted(sampled_indices.tolist())  # Sort for reproducibility
+                        sampled_dataset = Subset(det_dataset, sampled_indices)
+                        # Only log sampling info once per configuration (not per tier)
+                        if self.rank == 0 and config_idx == 0:
+                            log.info(f"Sampled {num_samples} samples from {len(det_dataset)} total (seed={self.seed})")
+                        final_dataset = sampled_dataset
+                    else:
+                        final_dataset = det_dataset
+                    
+                    if self.is_distributed:
+                        sampler = DistributedSampler(
+                            final_dataset,
+                            num_replicas=self.world_size,
+                            rank=self.rank,
+                            shuffle=False,
+                            seed=self.seed,  # Use consistent seed for reproducibility
+                        )
+                        shuffle = False
+                    else:
+                        sampler = None
+                        shuffle = False
+                    
+                    # Memory-optimized dataloader settings for A100-40GB
+                    # Only apply optimizations if explicitly enabled (auto-enabled on A100)
+                    # Use environment variables if set, otherwise use defaults
+                    if enable_memory_optimization:
+                        num_workers = int(os.environ.get("DATALOADER_NUM_WORKERS", 2))  # Reduced for A100
+                        prefetch_factor = int(os.environ.get("DATALOADER_PREFETCH_FACTOR", 1))  # Reduced for A100
+                        pin_memory = False  # Disable pin_memory to save memory on A100
+                        persistent_workers = False  # Disable to avoid worker state issues on A100
+                    else:
+                        # Default settings for H100 (no optimization)
+                        num_workers = int(os.environ.get("DATALOADER_NUM_WORKERS", 4))
+                        prefetch_factor = int(os.environ.get("DATALOADER_PREFETCH_FACTOR", 2))
+                        pin_memory = True  # Enable pin_memory for better performance on H100
+                        persistent_workers = (num_workers > 0)  # Enable for H100
+                    
+                    dataloader = torch.utils.data.DataLoader(
+                        final_dataset,
+                        batch_size=1,  # Always use batch_size=1 for per-sample measurement
+                        shuffle=shuffle,
+                        sampler=sampler,
+                        collate_fn=MMCollator(
+                            max_sequence_length=None,  # No truncation: use actual sequence length
+                            include_metadata=True,
+                            pad=False,  # No padding: use actual length for dynamic seq_len
+                            max_crops=max_crops
+                        ),
+                        num_workers=num_workers,
+                        pin_memory=pin_memory,
+                        prefetch_factor=prefetch_factor,
+                        persistent_workers=persistent_workers,
+                    )
+                    
+                    # Collect results
+                    all_scores = []
+                    all_predictions = []
+                    per_sample_results = []
+                    
+                    # Get metric
+                    metric_name = get_metric_for_dataset(dataset_name)
+                    
+                    # Process samples
+                    num_processed = 0
+                    # In distributed mode, each rank processes its share
+                    # The sampler already handles distribution, so we process all samples from this rank's dataloader
+                    # If num_samples was specified, the dataset was already sampled, so we process all
+                    max_samples_per_rank = None  # Process all samples from this rank's dataloader
+                    
+                    # Aggressive memory cleanup before warmup on A100
+                    if enable_memory_optimization and torch.cuda.is_available():
+                        torch.cuda.synchronize()
+                        torch.cuda.empty_cache()
+                        import gc
+                        gc.collect()
+                        torch.cuda.empty_cache()
+                    
+                    # Warmup
+                    if len(dataloader) > 0:
                         try:
-                            warmup_batch = {k: v.to(self.device, non_blocking=True) if isinstance(v, torch.Tensor) else v 
-                                           for k, v in warmup_batch.items()}
+                            warmup_batch = next(iter(dataloader))
+                            # Move to device with error handling
+                            try:
+                                warmup_batch = {k: v.to(self.device, non_blocking=True) if isinstance(v, torch.Tensor) else v 
+                                               for k, v in warmup_batch.items()}
+                            except RuntimeError as e:
+                                if "CUDA error" in str(e) or "device-side assert" in str(e) or "out of memory" in str(e).lower():
+                                    log.error(f"CUDA error during warmup batch transfer: {e}")
+                                    # Reset CUDA state
+                                    if torch.cuda.is_available():
+                                        torch.cuda.synchronize()
+                                        torch.cuda.empty_cache()
+                                        import gc
+                                        gc.collect()
+                                        torch.cuda.empty_cache()
+                                    raise
+                                else:
+                                    raise
+                            
+                            warmup_gen_config = self._create_generation_config(max_new_tokens)
+                            for warmup_idx in range(self.num_warmup):
+                                with torch.inference_mode():
+                                    with torch.autocast("cuda", enabled=True, dtype=torch.bfloat16):
+                                        try:
+                                            _ = self.model.generate(
+                                                input_ids=warmup_batch["input_ids"],
+                                                images=warmup_batch.get("images"),
+                                                image_masks=warmup_batch.get("image_masks"),
+                                                image_input_idx=warmup_batch.get("image_input_idx"),
+                                                generation_config=warmup_gen_config,
+                                            )
+                                            # Clear cache after each warmup iteration on A100
+                                            if enable_memory_optimization and torch.cuda.is_available() and warmup_idx < self.num_warmup - 1:
+                                                torch.cuda.empty_cache()
+                                        except RuntimeError as e:
+                                            if "CUDA error" in str(e) or "device-side assert" in str(e) or "out of memory" in str(e).lower():
+                                                log.error(f"CUDA error during warmup generation (iteration {warmup_idx+1}/{self.num_warmup}): {e}")
+                                                # Reset CUDA state
+                                                if torch.cuda.is_available():
+                                                    torch.cuda.synchronize()
+                                                    torch.cuda.empty_cache()
+                                                    import gc
+                                                    gc.collect()
+                                                    torch.cuda.empty_cache()
+                                                raise
+                                            else:
+                                                raise
+                            # Clear warmup batch from memory
+                            del warmup_batch
+                            # Aggressive cleanup after warmup on A100
+                            if enable_memory_optimization and torch.cuda.is_available():
+                                torch.cuda.synchronize()
+                                torch.cuda.empty_cache()
+                                import gc
+                                gc.collect()
+                                torch.cuda.empty_cache()
                         except RuntimeError as e:
                             if "CUDA error" in str(e) or "device-side assert" in str(e) or "out of memory" in str(e).lower():
-                                log.error(f"CUDA error during warmup batch transfer: {e}")
-                                # Reset CUDA state
-                                if torch.cuda.is_available():
-                                    torch.cuda.synchronize()
-                                    torch.cuda.empty_cache()
-                                    import gc
-                                    gc.collect()
-                                    torch.cuda.empty_cache()
+                                log.error(f"CUDA error during warmup, skipping this configuration: {e}")
+                                # Don't continue with this configuration if warmup fails
                                 raise
                             else:
                                 raise
-                        
-                        warmup_gen_config = self._create_generation_config(max_new_tokens)
-                        for warmup_idx in range(self.num_warmup):
-                            with torch.inference_mode():
-                                with torch.autocast("cuda", enabled=True, dtype=torch.bfloat16):
-                                    try:
-                                        _ = self.model.generate(
-                                            input_ids=warmup_batch["input_ids"],
-                                            images=warmup_batch.get("images"),
-                                            image_masks=warmup_batch.get("image_masks"),
-                                            image_input_idx=warmup_batch.get("image_input_idx"),
-                                            generation_config=warmup_gen_config,
-                                        )
-                                        # Clear cache after each warmup iteration on A100
-                                        if enable_memory_optimization and torch.cuda.is_available() and warmup_idx < self.num_warmup - 1:
-                                            torch.cuda.empty_cache()
-                                    except RuntimeError as e:
-                                        if "CUDA error" in str(e) or "device-side assert" in str(e) or "out of memory" in str(e).lower():
-                                            log.error(f"CUDA error during warmup generation (iteration {warmup_idx+1}/{self.num_warmup}): {e}")
-                                            # Reset CUDA state
-                                            if torch.cuda.is_available():
-                                                torch.cuda.synchronize()
-                                                torch.cuda.empty_cache()
-                                                import gc
-                                                gc.collect()
-                                                torch.cuda.empty_cache()
-                                            raise
-                                        else:
-                                            raise
-                        # Clear warmup batch from memory
-                        del warmup_batch
-                        # Aggressive cleanup after warmup on A100
-                        if enable_memory_optimization and torch.cuda.is_available():
-                            torch.cuda.synchronize()
-                            torch.cuda.empty_cache()
-                            import gc
-                            gc.collect()
-                            torch.cuda.empty_cache()
-                    except RuntimeError as e:
-                        if "CUDA error" in str(e) or "device-side assert" in str(e) or "out of memory" in str(e).lower():
-                            log.error(f"CUDA error during warmup, skipping this configuration: {e}")
-                            # Don't continue with this configuration if warmup fails
-                            raise
-                        else:
-                            raise
-                
-                # Setup profiler if requested
-                # Note: Profiler is created per sample, not per configuration, to avoid memory issues
-                # We'll create it inside the loop for each sample
-                
-                # Only show progress bar on rank 0 to avoid clutter
-                # Always use tqdm, but configure it to work in both TTY and non-TTY environments
-                if self.rank == 0:
-                    # Use tqdm with default stderr output (not explicitly specified)
-                    # This allows tqdm to detect TTY and use single-line mode
-                    progress_bar = tqdm(
-                        dataloader, 
-                        desc=f"Progress {config_idx+1}/{len(combinations)}",
-                        mininterval=0.5,  # Update at most every 0.5 seconds
-                        dynamic_ncols=False,  # Fixed width to prevent line wrapping
-                        ncols=100,  # Fixed width
-                        leave=True,  # Keep progress bar after completion so it's visible in terminal
-                        ascii=True,  # Use ASCII characters for better compatibility
-                    )
-                else:
-                    progress_bar = dataloader  # Use dataloader directly without tqdm
-                
-                for batch_idx, batch in enumerate(progress_bar):
-                    # Process all samples from this rank's dataloader
-                    # (sampling was already applied to dataset if num_samples was specified)
+                            # Aggressive cleanup after warmup on A100
+                            if enable_memory_optimization and torch.cuda.is_available():
+                                torch.cuda.synchronize()
+                                torch.cuda.empty_cache()
+                                import gc
+                                gc.collect()
+                                torch.cuda.empty_cache()
+                        except RuntimeError as e:
+                            if "CUDA error" in str(e) or "device-side assert" in str(e) or "out of memory" in str(e).lower():
+                                log.error(f"CUDA error during warmup, skipping this configuration: {e}")
+                                # Don't continue with this configuration if warmup fails
+                                raise
+                            else:
+                                raise
                     
-                    try:
-                        batch = {k: v.to(self.device, non_blocking=True) if isinstance(v, torch.Tensor) else v 
-                                for k, v in batch.items()}
-                        
-                        # Calculate actual vision tokens (measured from image_input_idx)
-                        actual_vision_tokens = self._calculate_vision_tokens(batch)
-                        
-                        # Extract values directly from metadata (most accurate, no inference needed)
-                        # Since we store tiling and image_size in metadata during preprocessing,
-                        # we can directly read them instead of inferring from image_input_idx shape
-                        metadata = batch.get("metadata")
-                        if isinstance(metadata, list) and len(metadata) > 0:
-                            metadata = metadata[0]  # Get first sample's metadata
-                        if not isinstance(metadata, dict):
-                            metadata = {}
-                        
-                        # Get tiling from metadata (stored during preprocessing)
-                        actual_tiling = None
-                        if "tiling" in metadata:
-                            tiling_val = metadata["tiling"]
-                            if isinstance(tiling_val, (list, tuple)) and len(tiling_val) == 2:
-                                actual_tiling = tuple(tiling_val)
-                        
-                        # Calculate actual_num_crops from tiling (most accurate)
-                        actual_num_crops = 0
-                        if actual_tiling is not None:
-                            actual_num_crops = actual_tiling[0] * actual_tiling[1]
-                        
-                        # Get image size from metadata (stored during preprocessing)
-                        actual_image_size = None
-                        if "image_size" in metadata:
-                            img_size = metadata["image_size"]
-                            if isinstance(img_size, (list, tuple)) and len(img_size) == 2:
-                                # image_size is stored as (width, height) in metadata, convert to (height, width)
-                                actual_image_size = (img_size[1], img_size[0])
-                        
-                        # Measure latency with stage breakdown
-                        # Note: Profiler can be used on all samples or just first sample
-                        # For detailed analysis, use on all samples (slower but more comprehensive)
-                        # For quick profiling, use only on first sample (faster)
-                        use_profiler_this_sample = use_profiler and (batch_idx == 0 or use_profiler_on_all_samples)
-                        
-                        if use_profiler_this_sample:
-                            # Use profiler for detailed analysis (only on first sample)
-                            from torch.profiler import profile, record_function, ProfilerActivity
-                            if profiler_activities is None:
-                                profiler_activities = [ProfilerActivity.CUDA]
-                            
-                            profiler = profile(
-                                activities=profiler_activities,
-                                record_shapes=False,  # Disable for performance
-                                with_stack=False,     # Disable for performance
-                                profile_memory=False, # Disable for performance
-                            )
-                            
-                            with profiler:
-                                with record_function("model_inference"):
-                                    # Generate with profiler
-                                    gen_config = self._create_generation_config(max_new_tokens)
-                                    with torch.inference_mode():
-                                        with torch.autocast("cuda", enabled=True, dtype=torch.bfloat16):
-                                            output = self.model.generate(
-                                                input_ids=batch["input_ids"],
-                                                images=batch.get("images"),
-                                                image_masks=batch.get("image_masks"),
-                                                image_input_idx=batch.get("image_input_idx"),
-                                                generation_config=gen_config,
-                                            )
-                            
-                            # Save profiler results
-                            profiler_output = profiler.key_averages().table(sort_by="cuda_time_total")
-                            profiler_file = Path(self.output_dir) / f"profiler_results_config_{config_idx+1}_sample_{batch_idx}.txt"
-                            with open(profiler_file, 'w') as f:
-                                f.write(profiler_output)
-                            log.info(f"Saved profiler results to {profiler_file}")
-                            
-                            # Measure latency separately (profiler adds overhead, so measure separately)
-                            latency_results = self.measure_inference_latency(
-                                batch=batch,
-                                max_new_tokens=max_new_tokens,
-                                measure_components=True,
-                                num_runs=num_runs_per_sample,
-                                use_hook_for_llm_prefill=True,
-                                use_eos_token=True,
-                            )
-                        else:
-                            # Use manual timing (no profiler, or profiler only on first sample)
-                            latency_results = self.measure_inference_latency(
-                                batch=batch,
-                                max_new_tokens=max_new_tokens,
-                                measure_components=True,
-                                num_runs=num_runs_per_sample,
-                                use_hook_for_llm_prefill=True,
-                                use_eos_token=True,
-                            )
-                            
-                            # Generate for accuracy
-                            gen_config = self._create_generation_config(max_new_tokens)
-                            with torch.inference_mode():
-                                with torch.autocast("cuda", enabled=True, dtype=torch.bfloat16):
-                                    output = self.model.generate(
-                                        input_ids=batch["input_ids"],
-                                        images=batch.get("images"),
-                                        image_masks=batch.get("image_masks"),
-                                        image_input_idx=batch.get("image_input_idx"),
-                                        generation_config=gen_config,
-                                    )
-                        
-                        # Evaluate accuracy
-                        batch_accuracy = self.compute_accuracy(
-                            batch=batch,
-                            predictions=output,
-                            metric_name=metric_name,
+                    # Setup profiler if requested
+                    # Note: Profiler is created per sample, not per configuration, to avoid memory issues
+                    # We'll create it inside the loop for each sample
+                    
+                    # Only show progress bar on rank 0 to avoid clutter
+                    # Always use tqdm, but configure it to work in both TTY and non-TTY environments
+                    if self.rank == 0:
+                        # Use tqdm with default stderr output (not explicitly specified)
+                        # This allows tqdm to detect TTY and use single-line mode
+                        progress_bar = tqdm(
+                            dataloader, 
+                            desc=f"Progress {config_idx+1}/{len(combinations)}",
+                            mininterval=0.5,  # Update at most every 0.5 seconds
+                            dynamic_ncols=False,  # Fixed width to prevent line wrapping
+                            ncols=100,  # Fixed width
+                            leave=True,  # Keep progress bar after completion so it's visible in terminal
+                            ascii=True,  # Use ASCII characters for better compatibility
                         )
+                    else:
+                        progress_bar = dataloader  # Use dataloader directly without tqdm
+                    
+                    for batch_idx, batch in enumerate(progress_bar):
+                        # Process all samples from this rank's dataloader
+                        # (sampling was already applied to dataset if num_samples was specified)
                         
-                        all_scores.extend([s["score"] for s in batch_accuracy["per_sample_scores"]])
-                        all_predictions.extend(batch_accuracy["per_sample_scores"])
-                        
-                        # Extract token counts (three separate values)
-                        actual_vision_tokens_from_latency = latency_results.get("actual_vision_tokens", 0)
-                        actual_text_tokens = latency_results.get("actual_text_tokens", 0)
-                        total_sequence_length = latency_results.get("total_sequence_length", 0)
-                        num_output_tokens = latency_results.get("num_output_tokens", 0)
-                        
-                        # Store per-sample result
-                        # Extract prediction and groundtruth from batch_accuracy
-                        pred_score = batch_accuracy["per_sample_scores"][0] if batch_accuracy["per_sample_scores"] else {}
-                        # Note: metadata already contains question and answers, so we don't save them separately
-                        # Store per-sample result
-                        if tier_list:
-                            # Tier-based mode: record selected crops per image
-                            # Calculate target_vision_tokens from actual_num_crops
-                            target_vision_tokens = (actual_num_crops + 1) * 144 if actual_num_crops > 0 else 0
-                            sample_result = {
+                        try:
+                            batch = {k: v.to(self.device, non_blocking=True) if isinstance(v, torch.Tensor) else v 
+                                    for k, v in batch.items()}
+                            
+                            # Calculate actual vision tokens (measured from image_input_idx)
+                            actual_vision_tokens = self._calculate_vision_tokens(batch)
+                            
+                            # Extract values directly from metadata (most accurate, no inference needed)
+                            # Since we store tiling and image_size in metadata during preprocessing,
+                            # we can directly read them instead of inferring from image_input_idx shape
+                            metadata = batch.get("metadata")
+                            if isinstance(metadata, list) and len(metadata) > 0:
+                                metadata = metadata[0]  # Get first sample's metadata
+                            if not isinstance(metadata, dict):
+                                metadata = {}
+                            
+                            # Get tiling from metadata (stored during preprocessing)
+                            actual_tiling = None
+                            if "tiling" in metadata:
+                                tiling_val = metadata["tiling"]
+                                if isinstance(tiling_val, (list, tuple)) and len(tiling_val) == 2:
+                                    actual_tiling = tuple(tiling_val)
+                            
+                            # Calculate actual_num_crops from tiling (most accurate)
+                            actual_num_crops = 0
+                            if actual_tiling is not None:
+                                actual_num_crops = actual_tiling[0] * actual_tiling[1]
+                            
+                            # Get image size from metadata (stored during preprocessing)
+                            actual_image_size = None
+                            if "image_size" in metadata:
+                                img_size = metadata["image_size"]
+                                if isinstance(img_size, (list, tuple)) and len(img_size) == 2:
+                                    # image_size is stored as (width, height) in metadata, convert to (height, width)
+                                    actual_image_size = (img_size[1], img_size[0])
+                            
+                            # Measure latency with stage breakdown
+                            # Note: Profiler can be used on all samples or just first sample
+                            # For detailed analysis, use on all samples (slower but more comprehensive)
+                            # For quick profiling, use only on first sample (faster)
+                            use_profiler_this_sample = use_profiler and (batch_idx == 0 or use_profiler_on_all_samples)
+                            
+                            if use_profiler_this_sample:
+                                # Use profiler for detailed analysis (only on first sample)
+                                from torch.profiler import profile, record_function, ProfilerActivity
+                                if profiler_activities is None:
+                                    profiler_activities = [ProfilerActivity.CUDA]
+                                
+                                profiler = profile(
+                                    activities=profiler_activities,
+                                    record_shapes=False,  # Disable for performance
+                                    with_stack=False,     # Disable for performance
+                                    profile_memory=False, # Disable for performance
+                                )
+                                
+                                with profiler:
+                                    with record_function("model_inference"):
+                                        # Generate with profiler
+                                        gen_config = self._create_generation_config(max_new_tokens)
+                                        with torch.inference_mode():
+                                            with torch.autocast("cuda", enabled=True, dtype=torch.bfloat16):
+                                                output = self.model.generate(
+                                                    input_ids=batch["input_ids"],
+                                                    images=batch.get("images"),
+                                                    image_masks=batch.get("image_masks"),
+                                                    image_input_idx=batch.get("image_input_idx"),
+                                                    generation_config=gen_config,
+                                                )
+                                
+                                # Save profiler results
+                                profiler_output = profiler.key_averages().table(sort_by="cuda_time_total")
+                                profiler_file = Path(self.output_dir) / f"profiler_results_config_{config_idx+1}_sample_{batch_idx}.txt"
+                                with open(profiler_file, 'w') as f:
+                                    f.write(profiler_output)
+                                log.info(f"Saved profiler results to {profiler_file}")
+                                
+                                # Measure latency separately (profiler adds overhead, so measure separately)
+                                latency_results = self.measure_inference_latency(
+                                    batch=batch,
+                                    max_new_tokens=max_new_tokens,
+                                    measure_components=True,
+                                    num_runs=num_runs_per_sample,
+                                    use_hook_for_llm_prefill=True,
+                                    use_eos_token=True,
+                                )
+                            else:
+                                # Use manual timing (no profiler, or profiler only on first sample)
+                                latency_results = self.measure_inference_latency(
+                                    batch=batch,
+                                    max_new_tokens=max_new_tokens,
+                                    measure_components=True,
+                                    num_runs=num_runs_per_sample,
+                                    use_hook_for_llm_prefill=True,
+                                    use_eos_token=True,
+                                )
+                                
+                                # Generate for accuracy
+                                gen_config = self._create_generation_config(max_new_tokens)
+                                with torch.inference_mode():
+                                    with torch.autocast("cuda", enabled=True, dtype=torch.bfloat16):
+                                        output = self.model.generate(
+                                            input_ids=batch["input_ids"],
+                                            images=batch.get("images"),
+                                            image_masks=batch.get("image_masks"),
+                                            image_input_idx=batch.get("image_input_idx"),
+                                            generation_config=gen_config,
+                                        )
+                            
+                            # Evaluate accuracy
+                            batch_accuracy = self.compute_accuracy(
+                                batch=batch,
+                                predictions=output,
+                                metric_name=metric_name,
+                            )
+                            
+                            all_scores.extend([s["score"] for s in batch_accuracy["per_sample_scores"]])
+                            all_predictions.extend(batch_accuracy["per_sample_scores"])
+                            
+                            # Extract token counts (three separate values)
+                            actual_vision_tokens_from_latency = latency_results.get("actual_vision_tokens", 0)
+                            actual_text_tokens = latency_results.get("actual_text_tokens", 0)
+                            total_sequence_length = latency_results.get("total_sequence_length", 0)
+                            num_output_tokens = latency_results.get("num_output_tokens", 0)
+                            
+                            # Store per-sample result
+                            # Extract prediction and groundtruth from batch_accuracy
+                            pred_score = batch_accuracy["per_sample_scores"][0] if batch_accuracy["per_sample_scores"] else {}
+                            # Note: metadata already contains question and answers, so we don't save them separately
+                            # Store per-sample result
+                            if tier_list:
+                                # Tier-based mode: record selected crops per image
+                                # Calculate target_vision_tokens from actual_num_crops
+                                target_vision_tokens = (actual_num_crops + 1) * 144 if actual_num_crops > 0 else 0
+                                sample_result = {
                                 "sample_id": batch_idx,
                                 "tier": tier_name,
                                 "tier_range": {"min_crops": tier["min_crops"], "max_crops": tier["max_crops"]},
@@ -1021,61 +1085,61 @@ class CombinedProfilingExperiment(BaseExperiment):
                                 "T_total": latency_results.get("T_total", 0.0),
                                 # Decode per token
                                 "T_decode_per_token": latency_results.get("T_LLM_decode", 0.0) / max(num_output_tokens, 1),
-                            }
-                        
-                        per_sample_results.append(sample_result)
-                        num_processed += 1
-                        
-                        # Memory optimization: clear cache periodically and after each sample
-                        # Only on A100 to avoid affecting H100 performance
-                        if enable_memory_optimization and torch.cuda.is_available():
-                            # Clear tensors after they're no longer needed
-                            # Note: batch and output are already used above, safe to delete now
-                            try:
-                                del batch
-                                del output
-                                del batch_accuracy
-                                # More aggressive cleanup on A100: clear every 5 samples
-                                if batch_idx % 5 == 0:
-                                    torch.cuda.synchronize()
-                                    torch.cuda.empty_cache()
-                                    # Force garbage collection every 20 samples
-                                    if batch_idx % 20 == 0:
-                                        import gc
-                                        gc.collect()
+                                }
+                            
+                            per_sample_results.append(sample_result)
+                            num_processed += 1
+                            
+                            # Memory optimization: clear cache periodically and after each sample
+                            # Only on A100 to avoid affecting H100 performance
+                            if enable_memory_optimization and torch.cuda.is_available():
+                                # Clear tensors after they're no longer needed
+                                # Note: batch and output are already used above, safe to delete now
+                                try:
+                                    del batch
+                                    del output
+                                    del batch_accuracy
+                                    # More aggressive cleanup on A100: clear every 5 samples
+                                    if batch_idx % 5 == 0:
+                                        torch.cuda.synchronize()
                                         torch.cuda.empty_cache()
-                            except Exception as e:
-                                log.warning(f"Error clearing memory for sample {batch_idx}: {e}")
+                                        # Force garbage collection every 20 samples
+                                        if batch_idx % 20 == 0:
+                                            import gc
+                                            gc.collect()
+                                            torch.cuda.empty_cache()
+                                except Exception as e:
+                                    log.warning(f"Error clearing memory for sample {batch_idx}: {e}")
                         
-                    except Exception as e:
-                        # Log full stack to locate CPU-side index errors
-                        log.error(f"Error processing sample {batch_idx}: {e}", exc_info=True)
-                        # Clear memory and reset CUDA state on error
-                        # Always handle CUDA errors, but only aggressive cleanup on A100
-                        if torch.cuda.is_available():
-                            try:
-                                # Reset CUDA state if there was a device-side error
-                                if "CUDA error" in str(e) or "device-side assert" in str(e) or "out of memory" in str(e).lower():
-                                    log.warning(f"CUDA error on sample {batch_idx}, attempting to reset...")
-                                    torch.cuda.synchronize()
-                                    torch.cuda.empty_cache()
-                                    # Give CUDA a moment to recover
-                                    import time
-                                    time.sleep(0.5)
-                                else:
-                                    # Only do aggressive cleanup on A100
-                                    if enable_memory_optimization:
-                                        if 'batch' in locals():
-                                            del batch
+                        except Exception as e:
+                            # Log full stack to locate CPU-side index errors
+                            log.error(f"Error processing sample {batch_idx}: {e}", exc_info=True)
+                            # Clear memory and reset CUDA state on error
+                            # Always handle CUDA errors, but only aggressive cleanup on A100
+                            if torch.cuda.is_available():
+                                try:
+                                    # Reset CUDA state if there was a device-side error
+                                    if "CUDA error" in str(e) or "device-side assert" in str(e) or "out of memory" in str(e).lower():
+                                        log.warning(f"CUDA error on sample {batch_idx}, attempting to reset...")
+                                        torch.cuda.synchronize()
                                         torch.cuda.empty_cache()
-                            except Exception as cleanup_error:
-                                log.warning(f"Error during cleanup: {cleanup_error}")
-                        continue
-                
-                # Calculate aggregate statistics
-                if per_sample_results:
-                    # Accuracy statistics
-                    accuracy_values = [s["accuracy"] for s in per_sample_results]
+                                        # Give CUDA a moment to recover
+                                        import time
+                                        time.sleep(0.5)
+                                    else:
+                                        # Only do aggressive cleanup on A100
+                                        if enable_memory_optimization:
+                                            if 'batch' in locals():
+                                                del batch
+                                            torch.cuda.empty_cache()
+                                except Exception as cleanup_error:
+                                    log.warning(f"Error during cleanup: {cleanup_error}")
+                            continue
+                    
+                    # Calculate aggregate statistics
+                    if per_sample_results:
+                        # Accuracy statistics
+                        accuracy_values = [s["accuracy"] for s in per_sample_results]
                     accuracy_mean = float(np.mean(accuracy_values))
                     accuracy_std = float(np.std(accuracy_values))
                     
@@ -1159,87 +1223,118 @@ class CombinedProfilingExperiment(BaseExperiment):
                         json.dump(config_result, f, indent=2)
                     # Don't log intermediate results (they're merged later, and logging adds clutter)
                     # Intermediate files are automatically cleaned up after merging
-                
-                # Memory optimization: clear cache between configurations
-                # Only on A100 to avoid affecting H100 performance
-                if enable_memory_optimization and torch.cuda.is_available():
-                    # Properly shutdown dataloader workers before deleting
-                    # This prevents the "can only test a child process" errors
-                    try:
-                        # Close any active iterator
-                        if hasattr(dataloader, '_iterator'):
-                            iterator = dataloader._iterator
-                            if iterator is not None:
-                                try:
-                                    iterator._shutdown_workers()
-                                except Exception:
-                                    pass  # Workers may already be shut down
-                        # Also try to access the iterator through iteration
-                        # This ensures any pending operations complete
+                    
+                    # Memory optimization: clear cache between configurations
+                    # Only on A100 to avoid affecting H100 performance
+                    if enable_memory_optimization and torch.cuda.is_available():
+                        # Properly shutdown dataloader workers before deleting
+                        # This prevents the "can only test a child process" errors
                         try:
-                            # Consume any remaining items in the iterator
-                            for _ in dataloader:
-                                break  # Just consume one to trigger cleanup
-                        except (StopIteration, RuntimeError):
-                            pass  # Iterator is already exhausted or closed
-                    except Exception as e:
-                        log.debug(f"Error shutting down dataloader workers: {e}")
-                    
-                    # Clean up dataloader and dataset references
-                    # Use explicit None assignment to help garbage collection
-                    try:
-                        dataloader = None
-                    except Exception as e:
-                        log.debug(f"Error clearing dataloader reference: {e}")
-                    
-                    # Clear dataset references
-                    try:
-                        final_dataset = None
-                        if 'sampled_dataset' in locals():
-                            sampled_dataset = None
-                        if 'det_dataset' in locals():
-                            det_dataset = None
-                    except Exception as e:
-                        log.debug(f"Error clearing dataset references: {e}")
-                    
-                    # Aggressive cache cleanup and garbage collection
-                    try:
-                        torch.cuda.synchronize()
-                        torch.cuda.empty_cache()
-                        import gc
-                        gc.collect()
-                        torch.cuda.empty_cache()
-                        log.info(f"Cleared GPU cache after configuration {config_idx+1}")
-                    except Exception as e:
-                        log.warning(f"Error clearing GPU cache: {e}")
-                
-            except Exception as e:
-                log.error(f"Error in configuration {config_idx+1}: {e}", exc_info=True)
-                # Clear memory and reset CUDA state on error
-                # Always handle CUDA errors, but only aggressive cleanup on A100
-                if torch.cuda.is_available():
-                    try:
-                        # Reset CUDA state if there was a device-side error or OOM
-                        if "CUDA error" in str(e) or "device-side assert" in str(e) or "out of memory" in str(e).lower():
-                            log.warning("CUDA error detected, attempting to reset CUDA state...")
+                            # Close any active iterator
+                            if hasattr(dataloader, '_iterator'):
+                                iterator = dataloader._iterator
+                                if iterator is not None:
+                                    try:
+                                        iterator._shutdown_workers()
+                                    except Exception:
+                                        pass  # Workers may already be shut down
+                            # Also try to access the iterator through iteration
+                            # This ensures any pending operations complete
+                            try:
+                                # Consume any remaining items in the iterator
+                                for _ in dataloader:
+                                    break  # Just consume one to trigger cleanup
+                            except (StopIteration, RuntimeError):
+                                pass  # Iterator is already exhausted or closed
+                        except Exception as e:
+                            log.debug(f"Error shutting down dataloader workers: {e}")
+                        
+                        # Clean up dataloader and dataset references
+                        # Use explicit None assignment to help garbage collection
+                        try:
+                            dataloader = None
+                        except Exception as e:
+                            log.debug(f"Error clearing dataloader reference: {e}")
+                        
+                        # Clear dataset references
+                        try:
+                            final_dataset = None
+                            if 'sampled_dataset' in locals():
+                                sampled_dataset = None
+                            if 'det_dataset' in locals():
+                                det_dataset = None
+                        except Exception as e:
+                            log.debug(f"Error clearing dataset references: {e}")
+                        
+                        # Aggressive cache cleanup and garbage collection
+                        try:
                             torch.cuda.synchronize()
-                            # Clear all caches and force garbage collection
                             torch.cuda.empty_cache()
                             import gc
                             gc.collect()
                             torch.cuda.empty_cache()
-                            # Give CUDA a moment to recover
-                            import time
-                            time.sleep(1)
-                        else:
-                            # Only do aggressive cleanup on A100
-                            if enable_memory_optimization:
+                            log.info(f"Cleared GPU cache after configuration {config_idx+1}")
+                        except Exception as e:
+                            log.warning(f"Error clearing GPU cache: {e}")
+                
+                    # Configuration completed successfully
+                    config_success = True
+                    break  # Exit retry loop
+                    
+                except Exception as e:
+                    error_str = str(e)
+                    error_type = type(e).__name__
+                    
+                    # Log error
+                    if retry_attempt == 0:
+                        log.error(f"Error in configuration {config_idx+1}: {e}", exc_info=True)
+                    else:
+                        log.warning(f"Error in configuration {config_idx+1} (retry {retry_attempt}/{max_config_retries-1}): {e}")
+                    
+                    # Check if error is retryable
+                    is_retryable = _is_retryable_config_error(e)
+                    
+                    # Clear memory and reset CUDA state on error
+                    # Always handle CUDA errors, but only aggressive cleanup on A100
+                    if torch.cuda.is_available():
+                        try:
+                            # Reset CUDA state if there was a device-side error or OOM
+                            if "CUDA error" in error_str or "device-side assert" in error_str or "out of memory" in error_str.lower():
+                                log.warning("CUDA error detected, attempting to reset CUDA state...")
+                                torch.cuda.synchronize()
+                                # Clear all caches and force garbage collection
                                 torch.cuda.empty_cache()
                                 import gc
                                 gc.collect()
                                 torch.cuda.empty_cache()
-                    except Exception as cleanup_error:
-                        log.warning(f"Error during cleanup: {cleanup_error}")
+                                # Give CUDA a moment to recover
+                                time.sleep(config_retry_delay)
+                            else:
+                                # Only do aggressive cleanup on A100
+                                if enable_memory_optimization:
+                                    torch.cuda.empty_cache()
+                                    import gc
+                                    gc.collect()
+                                    torch.cuda.empty_cache()
+                        except Exception as cleanup_error:
+                            log.warning(f"Error during cleanup: {cleanup_error}")
+                    
+                    # Decide whether to retry
+                    if not is_retryable:
+                        log.error(f"Non-retryable error in configuration {config_idx+1}, skipping: {error_type}")
+                        break  # Exit retry loop, skip this configuration
+                    elif retry_attempt < max_config_retries - 1:
+                        log.warning(f"Retryable error in configuration {config_idx+1}, retrying in {config_retry_delay}s... "
+                                  f"(attempt {retry_attempt + 1}/{max_config_retries})")
+                        time.sleep(config_retry_delay)
+                    else:
+                        log.error(f"Configuration {config_idx+1} failed after {max_config_retries} attempts, skipping")
+                        break  # Exit retry loop, skip this configuration
+                
+            # If configuration failed after all retries, continue to next configuration
+            if not config_success:
+                if self.rank == 0:
+                    log.warning(f"Skipping configuration {config_idx+1} due to persistent errors")
                 continue
         
         # Clean up
@@ -1415,6 +1510,10 @@ def main():
     parser.add_argument("--enable_memory_optimization", action="store_true",
                        help="Enable memory optimizations for limited GPU memory (e.g., A100-40GB). "
                             "Reduces dataloader workers, prefetch, and clears cache more aggressively.")
+    parser.add_argument("--max_config_retries", type=int, default=3,
+                       help="Maximum retries per configuration on error (default: 3)")
+    parser.add_argument("--config_retry_delay", type=int, default=5,
+                       help="Delay between configuration retries in seconds (default: 5)")
     
     args = parser.parse_args()
     
@@ -1494,6 +1593,8 @@ def main():
         num_runs_per_sample=args.num_runs_per_sample,
         use_profiler=args.use_profiler,
         use_profiler_on_all_samples=args.use_profiler_on_all_samples,
+        max_config_retries=args.max_config_retries,
+        config_retry_delay=args.config_retry_delay,
     )
 
 

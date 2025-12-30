@@ -206,7 +206,7 @@ def main():
     
     # Tier-based vision token control (A100 defaults: more tiers for comprehensive profiling)
     tier_list = ["low", "medium", "high"]  # Available: "low", "medium", "high"
-    top_k_list = [4, 8, 12]  # MoE top-k values
+    top_k_list = [4, 6, 8]  # MoE top-k values
     num_active_blocks_list = [12, 14, 16]  # Number of active transformer blocks
     
     # Memory optimization (enabled by default for A100)

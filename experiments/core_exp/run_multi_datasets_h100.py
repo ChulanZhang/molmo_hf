@@ -89,8 +89,12 @@ def run_combined_profiling(
     num_samples: int,
     num_runs_per_sample: int,
     log: logging.Logger,
-) -> None:
-    """Run combined profiling for a single dataset"""
+) -> bool:
+    """Run combined profiling for a single dataset
+    
+    Returns:
+        bool: True if successful, False if failed
+    """
     output_dir = base_output_dir
     
     # Concise dataset header (detailed config is logged in acc_lat_profiling.py)
@@ -100,8 +104,6 @@ def run_combined_profiling(
     # Ensure log directory exists
     log_dir = Path(base_output_dir) / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
-    log_file = log_dir / f"combined_profiling_{dataset_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
-    # Don't log log file location - it's not essential information
     
     # Build command
     cmd = [
@@ -121,50 +123,62 @@ def run_combined_profiling(
         "--num_runs_per_sample", str(num_runs_per_sample),
     ]
     
+    # Create log file
+    log_file = log_dir / f"combined_profiling_{dataset_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+    
     # Run command and tee output to log file
     # IMPORTANT: Don't redirect stdout to PIPE, as it breaks tqdm's TTY detection
     # Instead, use unbuffered mode and let the subprocess write directly to terminal
     # We'll capture output using a custom tee-like approach
-    import threading
-    
-    with open(log_file, 'w') as f:
-        # Create environment with warnings suppressed
-        env = dict(os.environ)
-        env['PYTHONUNBUFFERED'] = '1'  # Force unbuffered output
-        env['TORCH_DISTRIBUTED_DEBUG'] = 'OFF'  # Suppress torchrun warnings (must be OFF, INFO, or DETAIL)
-        
-        # IMPORTANT: Don't redirect stderr to stdout - let tqdm write directly to stderr
-        # This allows tqdm to detect TTY and use single-line mode
-        # We'll capture stdout for logging, but stderr goes directly to terminal
-        process = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,  # Capture stdout for logging
-            stderr=None,  # Let stderr go directly to terminal (for tqdm)
-            text=True,
-            bufsize=1,
-            env=env
-        )
-        
-        # Stream stdout to both terminal and log file, filtering out torchrun warnings
-        for line in process.stdout:
-            # Filter out torchrun OMP_NUM_THREADS warnings
-            if 'OMP_NUM_THREADS' in line or 'Setting OMP_NUM_THREADS' in line or '*****************************************' in line:
-                # Still write to log file but not to stdout
+    try:
+        with open(log_file, 'w') as f:
+            # Create environment with warnings suppressed
+            env = dict(os.environ)
+            env['PYTHONUNBUFFERED'] = '1'  # Force unbuffered output
+            env['TORCH_DISTRIBUTED_DEBUG'] = 'OFF'  # Suppress torchrun warnings (must be OFF, INFO, or DETAIL)
+            
+            # IMPORTANT: Don't redirect stderr to stdout - let tqdm write directly to stderr
+            # This allows tqdm to detect TTY and use single-line mode
+            # We'll capture stdout for logging, but stderr goes directly to terminal
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,  # Capture stdout for logging
+                stderr=None,  # Let stderr go directly to terminal (for tqdm)
+                text=True,
+                bufsize=1,
+                env=env
+            )
+            
+            # Stream stdout to both terminal and log file, filtering out torchrun warnings
+            for line in process.stdout:
+                # Filter out torchrun OMP_NUM_THREADS warnings
+                if 'OMP_NUM_THREADS' in line or 'Setting OMP_NUM_THREADS' in line or '*****************************************' in line:
+                    # Still write to log file but not to stdout
+                    f.write(line)
+                    f.flush()
+                    continue
+                sys.stdout.write(line)  # Write to actual stdout
+                sys.stdout.flush()
                 f.write(line)
                 f.flush()
-                continue
-            sys.stdout.write(line)  # Write to actual stdout
-            sys.stdout.flush()
-            f.write(line)
-            f.flush()
+            
+            process.wait()
         
-        process.wait()
-    
-    if process.returncode != 0:
-        log.error(f"Command failed with return code {process.returncode}")
-        sys.exit(process.returncode)
-    
-    # Don't log completion here - it's already logged in acc_lat_profiling.py
+        # Check if successful
+        if process.returncode == 0:
+            # Success - don't log completion here, it's already logged in acc_lat_profiling.py
+            return True
+        else:
+            # Failed - log error and return False (will continue to next dataset)
+            log.error(f"{Colors.RED}Command failed for {dataset_name} (return code {process.returncode}){Colors.RESET}")
+            log.error(f"Check log file: {log_file}")
+            return False
+            
+    except Exception as e:
+        # Unexpected error during subprocess execution
+        log.error(f"{Colors.RED}Unexpected error running {dataset_name}: {e}{Colors.RESET}")
+        log.error(f"Check log file: {log_file}")
+        return False
 
 
 def main():
@@ -186,8 +200,9 @@ def main():
     num_runs_per_sample = 1
     
     # Tier-based vision token control
-    tier_list = ["low", "medium", "high"]  # Available: "low", "medium", "high"
-    top_k_list = [4, 8, 12]  # MoE top-k values
+    # tier_list = ["low", "medium", "high"]  # Available: "low", "medium", "high"
+    tier_list = ["medium", "high"]  # Available: "low", "medium", "high"
+    top_k_list = [4, 6, 8]  # MoE top-k values
     num_active_blocks_list = [12, 14, 16]  # Number of active transformer blocks
     
     # Auto-detect number of GPUs (can be overridden with NUM_GPUS_OVERRIDE env var)
@@ -197,7 +212,7 @@ def main():
     # Dataset configurations
     # Format: (dataset_name, split, max_new_tokens)
     datasets = [
-        ("coco_2014_vqa", "validation", 16),
+        # ("coco_2014_vqa", "validation", 16),
         ("text_vqa", "validation", 64),
         ("okvqa", "validation", 16),
         ("science_qa_img", "validation", 16),
@@ -222,12 +237,14 @@ def main():
              f"{Colors.CYAN}GPUs:{Colors.RESET} {num_gpus}")
     log.info(f"{Colors.BRIGHT_YELLOW}Output:{Colors.RESET} {Colors.BRIGHT_WHITE}{base_output_dir}{Colors.RESET}")
     log.info(f"{Colors.BRIGHT_CYAN}{'='*60}{Colors.RESET}")
+    
     # Run experiments
+    failed_datasets = []
     for dataset_name, split, max_new_tokens in datasets:
         if specific_dataset and dataset_name != specific_dataset:
             continue
         
-        run_combined_profiling(
+        success = run_combined_profiling(
             dataset_name=dataset_name,
             split=split,
             max_new_tokens=max_new_tokens,
@@ -242,19 +259,30 @@ def main():
             num_runs_per_sample=num_runs_per_sample,
             log=log,
         )
+        
+        if not success:
+            failed_datasets.append(dataset_name)
+            # Continue to next dataset (don't interrupt)
+            log.warning(f"{Colors.YELLOW}Continuing to next dataset...{Colors.RESET}")
     
     # Concise completion message
     log.info(f"{Colors.BRIGHT_GREEN}{'='*60}{Colors.RESET}")
-    log.info(f"{Colors.BRIGHT_GREEN}All experiments completed!{Colors.RESET}")
+    if failed_datasets:
+        log.warning(f"{Colors.BRIGHT_YELLOW}Experiments completed with {len(failed_datasets)} failed dataset(s){Colors.RESET}")
+        log.warning(f"{Colors.YELLOW}Failed datasets: {', '.join(failed_datasets)}{Colors.RESET}")
+    else:
+        log.info(f"{Colors.BRIGHT_GREEN}All experiments completed successfully!{Colors.RESET}")
+    
     # List actual dataset names that were run
     completed_datasets = []
     for dataset_name, split, max_new_tokens in datasets:
         if specific_dataset and dataset_name != specific_dataset:
             continue
-        completed_datasets.append(dataset_name)
+        if dataset_name not in failed_datasets:
+            completed_datasets.append(dataset_name)
     if completed_datasets:
         dataset_dirs = [d.replace("_", "-") for d in completed_datasets]
-        log.info(f"{Colors.CYAN}Results: {', '.join(dataset_dirs)}{Colors.RESET}")
+        log.info(f"{Colors.CYAN}Successful datasets: {', '.join(dataset_dirs)}{Colors.RESET}")
     log.info(f"{Colors.BRIGHT_GREEN}{'='*60}{Colors.RESET}")
 
 
