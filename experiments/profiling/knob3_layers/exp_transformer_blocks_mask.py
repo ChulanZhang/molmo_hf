@@ -155,21 +155,18 @@ class BlockMaskWrapper:
             image_features = image_features.view(batch_size, num_image * num_patch, -1)
             image_input_idx = image_input_idx.view(batch_size, num_image * num_patch)
 
-            x_flat = x.view(batch_size * seq_len, -1)
-            # Ensure image_flat has the same dtype and device as x_flat
-            image_flat = image_features.to(device=x.device, dtype=x.dtype)
-            batch_offsets = (
-                torch.arange(batch_size, device=x.device)
-                .unsqueeze(1)
-                .expand_as(image_input_idx)
-                * seq_len
-            )
-            linear_idx = (batch_offsets + image_input_idx).view(-1)
-            x_flat.index_add_(0, linear_idx, image_flat)
-            x = x_flat.view(batch_size, seq_len, -1)
+            # Use the original simpler approach with direct indexing
+            valid = image_input_idx >= 0
+            batch_idx = torch.arange(batch_size, device=x.device)
+            batch_idx = torch.tile(batch_idx[:, None], [1, image_features.shape[1]])
+            
+            image_features = image_features.to(device=x.device, dtype=x.dtype)
+            x[batch_idx[valid], image_input_idx[valid]] += image_features[valid]
             
             if config.use_cls_feature:
                 x = torch.cat([x[:, :1], cls_embed, x[:, 1:-num_image]], dim=1)
+                # Update seq_len after inserting cls_embed
+                seq_len = x.shape[1]
                 valid_images = torch.any(
                     (image_input_idx >= 0).view(batch_size, num_image, num_patch), dim=-1
                 )

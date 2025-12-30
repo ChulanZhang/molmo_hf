@@ -46,6 +46,42 @@ from exp_transformer_blocks_mask import BlockMaskWrapper
 
 log = logging.getLogger(__name__)
 
+# ANSI color codes for highlighting key information in log messages
+# These work with both colorlog and RichHandler
+class Colors:
+    """ANSI color codes for terminal output"""
+    RESET = '\033[0m'
+    BOLD = '\033[1m'
+    # Bright colors for highlighting
+    BRIGHT_CYAN = '\033[1;36m'
+    BRIGHT_MAGENTA = '\033[1;35m'
+    BRIGHT_YELLOW = '\033[1;33m'
+    BRIGHT_WHITE = '\033[1;37m'
+    BRIGHT_GREEN = '\033[1;32m'
+    BRIGHT_BLUE = '\033[1;34m'
+    # Regular colors
+    CYAN = '\033[0;36m'
+    YELLOW = '\033[0;33m'
+    GREEN = '\033[0;32m'
+
+# Helper functions for colored logging of key information
+def log_benchmark_name(dataset_name: str, split: str):
+    """Log benchmark name with highlight color"""
+    log.info(f"{Colors.BRIGHT_CYAN}{'='*60}{Colors.RESET}")
+    log.info(f"{Colors.BRIGHT_CYAN}Running Combined Profiling on {Colors.BRIGHT_MAGENTA}{dataset_name}{Colors.RESET}{Colors.BRIGHT_CYAN} ({split}){Colors.RESET}")
+    log.info(f"{Colors.BRIGHT_CYAN}{'='*60}{Colors.RESET}")
+
+def log_config_info(key: str, value: Any, highlight: bool = False):
+    """Log configuration information with color"""
+    if highlight:
+        log.info(f"{Colors.BRIGHT_YELLOW}{key}:{Colors.RESET} {Colors.BRIGHT_WHITE}{value}{Colors.RESET}")
+    else:
+        log.info(f"{Colors.CYAN}{key}:{Colors.RESET} {value}")
+
+def log_config_section(title: str):
+    """Log configuration section header with color"""
+    log.info(f"{Colors.BRIGHT_BLUE}{title}{Colors.RESET}")
+
 
 # Tier configurations for adaptive crop selection
 VISION_TOKEN_TIERS = {
@@ -61,22 +97,22 @@ VISION_TOKEN_TIERS = {
         "name": "medium",
         "min_crops": 4,
         "max_crops": 8,
-        "preferred_crops": [4, 6, 8],
+        "preferred_crops": [6, 4, 8],
         "typical_vision_tokens": 1008,
         "description": "Medium images, standard tasks"
     },
     "high": {
         "name": "high",
         "min_crops": 9,
-        "max_crops": 12,
-        "preferred_crops": [9, 12],
+        "max_crops": 15,
+        "preferred_crops": [12, 9, 15],
         "typical_vision_tokens": 1872,
         "description": "Large images, complex tasks"
     },
 }
 
 
-def is_a100_gpu(device: Optional[torch.device] = None) -> bool:
+def is_a100_gpu(device: Optional[torch.device] = None, silent: bool = False) -> bool:
     """
     Detect if the current GPU is an A100 (typically 40GB).
     
@@ -86,6 +122,7 @@ def is_a100_gpu(device: Optional[torch.device] = None) -> bool:
     
     Args:
         device: CUDA device to check. If None, uses current device.
+        silent: If True, don't log the detection result (for non-rank-0 processes).
     
     Returns:
         True if GPU appears to be A100 (40GB), False otherwise.
@@ -105,10 +142,12 @@ def is_a100_gpu(device: Optional[torch.device] = None) -> bool:
         # Use 45GB as threshold to distinguish A100 from H100
         is_a100 = total_memory_gb < 45.0
         
-        if is_a100:
-            log.info(f"Detected A100 GPU: {gpu_name} ({total_memory_gb:.2f} GB)")
-        else:
-            log.info(f"Detected non-A100 GPU: {gpu_name} ({total_memory_gb:.2f} GB)")
+        # Only log if not silent (allows rank 0 to log while other ranks stay silent)
+        if not silent:
+            if is_a100:
+                log.info(f"Detected A100 GPU: {gpu_name} ({total_memory_gb:.2f} GB)")
+            else:
+                log.info(f"Detected non-A100 GPU: {gpu_name} ({total_memory_gb:.2f} GB)")
         
         return is_a100
     except Exception as e:
@@ -199,80 +238,6 @@ def image_size_to_tiling(
     rows = max(1, round((target_h - total_margin_pixels) / crop_window_size))
     cols = max(1, round((target_w - total_margin_pixels) / crop_window_size))
     return rows, cols
-
-
-def calculate_actual_values(
-    batch: Dict[str, torch.Tensor],
-    actual_vision_tokens: int,
-) -> Dict[str, Any]:
-    """
-    Calculate actual values from batch after preprocessing.
-    
-    Args:
-        batch: Batch dictionary with image_input_idx and metadata
-        actual_vision_tokens: Actual vision tokens (from _calculate_vision_tokens)
-    
-    Returns:
-        Dictionary with actual values:
-        - actual_num_crops: Actual number of crops (inferred from vision tokens or image_input_idx)
-        - actual_tiling: (rows, cols) tiling configuration (inferred, may be None)
-        - actual_image_size: (height, width) actual image size (from metadata if available)
-        - actual_vision_tokens: Actual vision tokens
-    """
-    # Try to infer actual number of crops from image_input_idx
-    # image_input_idx has shape [seq_len] and contains indices for vision tokens
-    # Each crop (including global image) contributes 144 tokens
-    # We can count distinct "crop groups" by analyzing image_input_idx patterns
-    actual_num_crops = None
-    if "image_input_idx" in batch and batch["image_input_idx"] is not None:
-        image_input_idx = batch["image_input_idx"]
-        if isinstance(image_input_idx, torch.Tensor):
-            # Count valid vision tokens (>= 0)
-            valid_indices = image_input_idx[image_input_idx >= 0]
-            if len(valid_indices) > 0:
-                # Each crop contributes 144 tokens (12×12 grid)
-                # So num_crops = (total_valid_tokens / 144) - 1 (subtract 1 for global image)
-                estimated_num_crops = max(0, (len(valid_indices) // 144) - 1)
-                actual_num_crops = estimated_num_crops
-    
-    # Fallback: estimate from actual_vision_tokens if image_input_idx not available
-    if actual_num_crops is None:
-        # Formula: actual_vision_tokens = (actual_num_crops + 1) * 144 (theoretical)
-        # But actual may be less due to invalid patches
-        # So we estimate: actual_num_crops ≈ (actual_vision_tokens / 144) - 1
-        actual_num_crops = max(0, (actual_vision_tokens // 144) - 1)
-    
-    # Try to get actual image size from metadata
-    actual_image_size = None
-    if "metadata" in batch and batch["metadata"] is not None:
-        metadata = batch["metadata"]
-        if isinstance(metadata, dict) and "image_size" in metadata:
-            # image_size is stored as (width, height) in metadata
-            img_size = metadata["image_size"]
-            if isinstance(img_size, (list, tuple)) and len(img_size) == 2:
-                actual_image_size = (img_size[1], img_size[0])  # Convert to (height, width)
-    
-    # Infer tiling from num_crops (if we can determine it)
-    # This is approximate since we don't have direct access to tiling
-    actual_tiling = None
-    if actual_num_crops > 0:
-        # Try to infer tiling from num_crops
-        # We can't know the exact tiling without more information, so we'll try to infer
-        # from image aspect ratio if available, or use a reasonable default
-        if actual_image_size is not None:
-            actual_h, actual_w = actual_image_size
-            aspect_ratio = actual_w / actual_h if actual_h > 0 else 1.0
-            actual_tiling = crops_to_tiling(actual_num_crops, aspect_ratio)
-        else:
-            # Default to square tiling (best guess)
-            actual_tiling = crops_to_tiling(actual_num_crops, 1.0)
-    
-    return {
-        "actual_num_crops": actual_num_crops,
-        "actual_tiling": actual_tiling,
-        "actual_image_size": actual_image_size,
-        "actual_vision_tokens": actual_vision_tokens,
-    }
 
 
 def crops_to_max_crops(num_crops: int) -> int:
@@ -389,7 +354,9 @@ class CombinedProfilingExperiment(BaseExperiment):
         base_output_dir = Path(output_dir)
         dataset_suffix = dataset_name.replace("_", "-")
         output_dir = str(base_output_dir / dataset_suffix)  # Save in subdirectory, not sibling
-        log.info(f"Output directory: {output_dir}")
+        # Only log output directory on rank 0 to reduce clutter
+        if self.rank == 0:
+            log.info(f"Output directory: {output_dir}")
         
         super().__init__(
             model_path=model_path,
@@ -404,7 +371,8 @@ class CombinedProfilingExperiment(BaseExperiment):
         # Auto-detect A100 and enable memory optimization if needed
         # This ensures H100 experiments are not affected
         # Device is set in BaseExperiment.__init__, so we can check it now
-        self.is_a100 = is_a100_gpu(self.device)
+        # Only log GPU detection on rank 0 to reduce clutter
+        self.is_a100 = is_a100_gpu(self.device, silent=(self.rank != 0))
     
     def _create_generation_config(self, max_new_tokens: int) -> GenerationConfig:
         """
@@ -460,7 +428,7 @@ class CombinedProfilingExperiment(BaseExperiment):
     def _set_max_crops(self, max_crops: int):
         """Set max_crops in model config."""
         self.model.config.max_crops = max_crops
-        log.info(f"Set max_crops={max_crops}")
+        # Don't log max_crops setting - it's already shown in configuration header
     
     def _set_top_k(self, k: int):
         """Set top_k for all MoE blocks."""
@@ -493,7 +461,7 @@ class CombinedProfilingExperiment(BaseExperiment):
                     block.mlp.top_k = k
                     moe_blocks_found += 1
         
-        log.info(f"Updated {moe_blocks_found} MoE blocks to use top_k={k}")
+        # Don't log MoE block updates - top_k is already shown in configuration header
         return moe_blocks_found
     
     def _set_active_blocks_importance_based(
@@ -560,7 +528,6 @@ class CombinedProfilingExperiment(BaseExperiment):
         use_profiler_on_all_samples: bool = False,  # If True, profile all samples; if False, only first sample
         profiler_activities: Optional[List] = None,
         enable_memory_optimization: bool = False,  # Enable memory optimizations for limited GPU memory
-        resize_to_fill: bool = True,  # Upscale small images to fill target canvas before tiling
     ):
         """
         Run combined profiling experiment using tier-based vision token control.
@@ -587,9 +554,15 @@ class CombinedProfilingExperiment(BaseExperiment):
         # Store as instance variable for use in filename generation
         self.tier_list = tier_list
         
-        log.info(f"Using tier-based vision token control: {tier_list}")
-        log.info("Note: select_tiling will adaptively select best crop count within each tier based on image aspect ratio")
-        log.info("      Each image will be processed with the tier's crop range, and actual crops/vision tokens will be recorded")
+        # Log benchmark name with highlight (only on rank 0 to avoid duplication)
+        if self.rank == 0:
+            log_benchmark_name(dataset_name, split)
+            
+            # Concise configuration summary
+            log_config_section("Experiment Configuration")
+            log_config_info("Dataset", f"{dataset_name}/{split}", highlight=True)
+            log_config_info("Tiers", tier_list, highlight=True)
+            log_config_info("Samples", f"{num_samples if num_samples else 'all'}")
         
         if top_k_list is None:
             top_k_list = [4, 8, 12]  # Based on previous experiments
@@ -603,15 +576,13 @@ class CombinedProfilingExperiment(BaseExperiment):
             for top_k in top_k_list:
                 for num_active_blocks in num_active_blocks_list:
                     combinations.append((tier, top_k, num_active_blocks))
-        log.info(f"Testing {len(combinations)} configurations (tiers x top_k x num_active_blocks)")
         
-        log.info(f"Testing {len(combinations)} configurations")
-        log.info(f"Dataset: {dataset_name}/{split}")
-        log.info(f"Number of samples: {num_samples if num_samples else 'all'}")
-        log.info(f"Runs per sample: {num_runs_per_sample}")
-        log.info(f"Use profiler: {use_profiler}")
-        if use_profiler:
-            log.info(f"Profiler mode: {'all samples' if use_profiler_on_all_samples else 'first sample only'}")
+        if self.rank == 0:
+            log_config_info("Configurations", f"{len(combinations)} (tiers × top_k × blocks)", highlight=True)
+        
+        # Profiler info only if enabled
+        if self.rank == 0 and use_profiler:
+            log_config_info("Profiler", 'all samples' if use_profiler_on_all_samples else 'first sample only')
         
         # Auto-enable memory optimization on A100, but respect explicit flag
         # If explicitly disabled, don't auto-enable
@@ -634,11 +605,8 @@ class CombinedProfilingExperiment(BaseExperiment):
         
         dataset = get_dataset_by_name(dataset_name, split=split)
         
-        # Apply sampling if specified (before creating dataloader)
-        if num_samples is not None:
-            # Unwrap DeterministicDataset if needed to get base dataset
-            # For now, we'll limit via max_steps in dataloader iteration
-            log.info(f"Will limit to {num_samples} samples per rank")
+                # Apply sampling if specified (before creating dataloader)
+        # Don't log "Will limit to X samples" - it's redundant with "Sampled X samples" below
         
         results = []
         
@@ -650,16 +618,15 @@ class CombinedProfilingExperiment(BaseExperiment):
             max_crops = tier["max_crops"]  # Use tier max_crops as upper bound
             
             if self.rank == 0:
-                log.info(f"\n{'='*60}")
-                log.info(f"Configuration {config_idx+1}/{len(combinations)}: "
-                         f"tier={tier_name} (crops: {tier['min_crops']}-{tier['max_crops']}), "
-                         f"top_k={top_k}, num_active_blocks={num_active_blocks}")
-                log.info(f"{'='*60}")
+                # Concise configuration header (no leading newline to avoid extra blank line)
+                log.info(f"{Colors.BRIGHT_GREEN}Config {config_idx+1}/{len(combinations)}:{Colors.RESET} "
+                         f"{Colors.BRIGHT_YELLOW}tier={tier_name}{Colors.RESET} "
+                         f"({Colors.CYAN}{tier['min_crops']}-{tier['max_crops']} crops{Colors.RESET}), "
+                         f"{Colors.BRIGHT_YELLOW}top_k={top_k}{Colors.RESET}, "
+                         f"{Colors.BRIGHT_YELLOW}blocks={num_active_blocks}{Colors.RESET}")
             
             try:
-                log.info(f"Tier: {tier_name} (crops: {tier['min_crops']}-{tier['max_crops']}), "
-                         f"max_crops={max_crops}, preferred_crops={tier['preferred_crops']}")
-                log.info(f"Note: Actual crop count and vision tokens will be recorded per image")
+                # Configuration details are already logged above, skip redundant tier info
                 
                 # Aggressive memory cleanup at start of each configuration on A100
                 if enable_memory_optimization and torch.cuda.is_available():
@@ -698,7 +665,6 @@ class CombinedProfilingExperiment(BaseExperiment):
                     overlap_margins=self.model.config.overlap_margins,
                     image_padding_mask=bool(self.model.config.image_padding_embed),
                     force_full_tokens=force_full_tokens,  # Count padded patches as valid to match target tokens
-                    resize_to_fill=resize_to_fill,
                 )
                 
                 formatter = DataFormatter(
@@ -726,7 +692,9 @@ class CombinedProfilingExperiment(BaseExperiment):
                     sampled_indices = rng.choice(all_indices, size=num_samples, replace=False)
                     sampled_indices = sorted(sampled_indices.tolist())  # Sort for reproducibility
                     sampled_dataset = Subset(det_dataset, sampled_indices)
-                    log.info(f"Sampled {num_samples} samples from {len(det_dataset)} total (seed={self.seed})")
+                    # Only log sampling info once per configuration (not per tier)
+                    if self.rank == 0 and config_idx == 0:
+                        log.info(f"Sampled {num_samples} samples from {len(det_dataset)} total (seed={self.seed})")
                     final_dataset = sampled_dataset
                 else:
                     final_dataset = det_dataset
@@ -870,7 +838,24 @@ class CombinedProfilingExperiment(BaseExperiment):
                 # Note: Profiler is created per sample, not per configuration, to avoid memory issues
                 # We'll create it inside the loop for each sample
                 
-                for batch_idx, batch in enumerate(tqdm(dataloader, desc=f"Config {config_idx+1}/{len(combinations)}")):
+                # Only show progress bar on rank 0 to avoid clutter
+                # Always use tqdm, but configure it to work in both TTY and non-TTY environments
+                if self.rank == 0:
+                    # Use tqdm with default stderr output (not explicitly specified)
+                    # This allows tqdm to detect TTY and use single-line mode
+                    progress_bar = tqdm(
+                        dataloader, 
+                        desc=f"Progress {config_idx+1}/{len(combinations)}",
+                        mininterval=0.5,  # Update at most every 0.5 seconds
+                        dynamic_ncols=False,  # Fixed width to prevent line wrapping
+                        ncols=100,  # Fixed width
+                        leave=True,  # Keep progress bar after completion so it's visible in terminal
+                        ascii=True,  # Use ASCII characters for better compatibility
+                    )
+                else:
+                    progress_bar = dataloader  # Use dataloader directly without tqdm
+                
+                for batch_idx, batch in enumerate(progress_bar):
                     # Process all samples from this rank's dataloader
                     # (sampling was already applied to dataset if num_samples was specified)
                     
@@ -881,25 +866,34 @@ class CombinedProfilingExperiment(BaseExperiment):
                         # Calculate actual vision tokens (measured from image_input_idx)
                         actual_vision_tokens = self._calculate_vision_tokens(batch)
                         
-                        # Get original image size from metadata (if available)
-                        original_image_size = None
-                        if "metadata" in batch and batch["metadata"] is not None:
-                            metadata = batch["metadata"]
-                            if isinstance(metadata, dict) and "image_size" in metadata:
-                                # image_size is stored as (width, height) in metadata
-                                img_size = metadata["image_size"]
-                                if isinstance(img_size, (list, tuple)) and len(img_size) == 2:
-                                    original_image_size = tuple(img_size)  # Keep as (width, height)
+                        # Extract values directly from metadata (most accurate, no inference needed)
+                        # Since we store tiling and image_size in metadata during preprocessing,
+                        # we can directly read them instead of inferring from image_input_idx shape
+                        metadata = batch.get("metadata")
+                        if isinstance(metadata, list) and len(metadata) > 0:
+                            metadata = metadata[0]  # Get first sample's metadata
+                        if not isinstance(metadata, dict):
+                            metadata = {}
                         
-                        # Calculate theoretical values (from target_vision_tokens or image size)
-                        # Tier-based mode: no theoretical values (selection is per-image, varies by image)
-                        # We only record actual values (selected_crops, actual_vision_tokens)
+                        # Get tiling from metadata (stored during preprocessing)
+                        actual_tiling = None
+                        if "tiling" in metadata:
+                            tiling_val = metadata["tiling"]
+                            if isinstance(tiling_val, (list, tuple)) and len(tiling_val) == 2:
+                                actual_tiling = tuple(tiling_val)
                         
-                        # Calculate actual values (from batch after preprocessing)
-                        actual_values = calculate_actual_values(
-                            batch=batch,
-                            actual_vision_tokens=actual_vision_tokens,
-                        )
+                        # Calculate actual_num_crops from tiling (most accurate)
+                        actual_num_crops = 0
+                        if actual_tiling is not None:
+                            actual_num_crops = actual_tiling[0] * actual_tiling[1]
+                        
+                        # Get image size from metadata (stored during preprocessing)
+                        actual_image_size = None
+                        if "image_size" in metadata:
+                            img_size = metadata["image_size"]
+                            if isinstance(img_size, (list, tuple)) and len(img_size) == 2:
+                                # image_size is stored as (width, height) in metadata, convert to (height, width)
+                                actual_image_size = (img_size[1], img_size[0])
                         
                         # Measure latency with stage breakdown
                         # Note: Profiler can be used on all samples or just first sample
@@ -983,8 +977,10 @@ class CombinedProfilingExperiment(BaseExperiment):
                         all_scores.extend([s["score"] for s in batch_accuracy["per_sample_scores"]])
                         all_predictions.extend(batch_accuracy["per_sample_scores"])
                         
-                        # Extract token counts
-                        num_input_text_tokens = latency_results.get("num_input_text_tokens", 0)
+                        # Extract token counts (three separate values)
+                        actual_vision_tokens_from_latency = latency_results.get("actual_vision_tokens", 0)
+                        actual_text_tokens = latency_results.get("actual_text_tokens", 0)
+                        total_sequence_length = latency_results.get("total_sequence_length", 0)
                         num_output_tokens = latency_results.get("num_output_tokens", 0)
                         
                         # Store per-sample result
@@ -994,24 +990,24 @@ class CombinedProfilingExperiment(BaseExperiment):
                         # Store per-sample result
                         if tier_list:
                             # Tier-based mode: record selected crops per image
-                            selected_crops = actual_values.get("actual_num_crops", 0)
-                            selected_vision_tokens = (selected_crops + 1) * 144 if selected_crops > 0 else 0
+                            # Calculate target_vision_tokens from actual_num_crops
+                            target_vision_tokens = (actual_num_crops + 1) * 144 if actual_num_crops > 0 else 0
                             sample_result = {
                                 "sample_id": batch_idx,
                                 "tier": tier_name,
                                 "tier_range": {"min_crops": tier["min_crops"], "max_crops": tier["max_crops"]},
-                                "selected_crops": selected_crops,  # Per-image selection
-                                "selected_vision_tokens": selected_vision_tokens,
-                                "actual_vision_tokens": actual_vision_tokens,
                                 "top_k": top_k,
                                 "num_active_blocks": num_active_blocks,
-                                "input_text_tokens": num_input_text_tokens,
                                 "output_tokens": num_output_tokens,
-                                "resize_to_fill": resize_to_fill,
-                                # Actual values (from batch after preprocessing)
-                                "actual_num_crops": actual_values["actual_num_crops"],
-                                "actual_tiling": actual_values["actual_tiling"],
-                                "actual_image_size": actual_values["actual_image_size"],
+                                # Image information (directly from metadata, no inference needed)
+                                "actual_image_size": actual_image_size,
+                                "actual_num_crops": actual_num_crops,
+                                "actual_tiling": actual_tiling,
+                                "target_vision_tokens": target_vision_tokens,  # Theoretical: (num_crops + 1) * 144
+                                # Token counts (three separate values)
+                                "actual_vision_tokens": actual_vision_tokens_from_latency,  # Actual vision tokens from image_input_idx
+                                "actual_text_tokens": actual_text_tokens,  # Actual text tokens (total - vision)
+                                "total_sequence_length": total_sequence_length,  # Total sequence length (vision + text)
                                 # Accuracy and prediction details
                                 "accuracy": pred_score.get("score", 0.0),
                                 "pred": pred_score.get("pred", ""),  # Prediction text
@@ -1102,15 +1098,15 @@ class CombinedProfilingExperiment(BaseExperiment):
                     aggregate_stats["vision_tokens_mean"] = float(np.mean(vision_token_values))
                     aggregate_stats["vision_tokens_std"] = float(np.std(vision_token_values))
                     
-                    # Selected crops statistics (per-image selection within tier)
-                    selected_crops_list = [s.get("selected_crops", 0) for s in per_sample_results]
-                    aggregate_stats["selected_crops_mean"] = float(np.mean(selected_crops_list)) if selected_crops_list else 0.0
-                    aggregate_stats["selected_crops_std"] = float(np.std(selected_crops_list)) if selected_crops_list else 0.0
+                    # Actual num_crops statistics (per-image selection within tier)
+                    actual_num_crops_list = [s.get("actual_num_crops", 0) for s in per_sample_results]
+                    aggregate_stats["selected_crops_mean"] = float(np.mean(actual_num_crops_list)) if actual_num_crops_list else 0.0
+                    aggregate_stats["selected_crops_std"] = float(np.std(actual_num_crops_list)) if actual_num_crops_list else 0.0
                     
-                    # Selected vision tokens statistics (theoretical for selected crops)
-                    selected_vision_tokens_list = [s.get("selected_vision_tokens", 0) for s in per_sample_results]
-                    aggregate_stats["selected_vision_tokens_mean"] = float(np.mean(selected_vision_tokens_list)) if selected_vision_tokens_list else 0.0
-                    aggregate_stats["selected_vision_tokens_std"] = float(np.std(selected_vision_tokens_list)) if selected_vision_tokens_list else 0.0
+                    # Target vision tokens statistics (theoretical for selected crops)
+                    target_vision_tokens_list = [s.get("target_vision_tokens", 0) for s in per_sample_results]
+                    aggregate_stats["target_vision_tokens_mean"] = float(np.mean(target_vision_tokens_list)) if target_vision_tokens_list else 0.0
+                    aggregate_stats["target_vision_tokens_std"] = float(np.std(target_vision_tokens_list)) if target_vision_tokens_list else 0.0
                     
                     # Actual num_crops statistics
                     actual_num_crops_values = [s.get("actual_num_crops", 0) for s in per_sample_results]
@@ -1120,7 +1116,7 @@ class CombinedProfilingExperiment(BaseExperiment):
                     
                     # Selected crops distribution (how many images selected each crop count)
                     selected_crops_distribution = {}
-                    for crops in selected_crops_list:
+                    for crops in actual_num_crops_list:
                         selected_crops_distribution[crops] = selected_crops_distribution.get(crops, 0) + 1
                     
                     # Store results: tier-based mode only
@@ -1130,8 +1126,8 @@ class CombinedProfilingExperiment(BaseExperiment):
                         "selected_crops_distribution": selected_crops_distribution,
                         "selected_crops_mean": aggregate_stats["selected_crops_mean"],
                         "selected_crops_std": aggregate_stats["selected_crops_std"],
-                        "selected_vision_tokens_mean": aggregate_stats["selected_vision_tokens_mean"],
-                        "selected_vision_tokens_std": aggregate_stats["selected_vision_tokens_std"],
+                        "target_vision_tokens_mean": aggregate_stats["target_vision_tokens_mean"],
+                        "target_vision_tokens_std": aggregate_stats["target_vision_tokens_std"],
                         "actual_vision_tokens_mean": aggregate_stats.get("vision_tokens_mean", 0.0),
                         "actual_vision_tokens_std": aggregate_stats.get("vision_tokens_std", 0.0),
                         "max_crops": max_crops,  # max_crops parameter passed to select_tiling
@@ -1139,7 +1135,6 @@ class CombinedProfilingExperiment(BaseExperiment):
                         "num_active_blocks": num_active_blocks,
                         "num_total_blocks": total_blocks,
                         "active_block_indices": block_indices,
-                        "resize_to_fill": resize_to_fill,
                         "accuracy": accuracy_mean,
                         "accuracy_std": accuracy_std,
                         "num_samples": num_processed,
@@ -1162,7 +1157,8 @@ class CombinedProfilingExperiment(BaseExperiment):
                         output_file = Path(self.output_dir) / base_filename
                     with open(output_file, 'w') as f:
                         json.dump(config_result, f, indent=2)
-                    log.info(f"Rank {self.rank}: Saved intermediate results to {output_file}")
+                    # Don't log intermediate results (they're merged later, and logging adds clutter)
+                    # Intermediate files are automatically cleaned up after merging
                 
                 # Memory optimization: clear cache between configurations
                 # Only on A100 to avoid affecting H100 performance
@@ -1320,25 +1316,25 @@ class CombinedProfilingExperiment(BaseExperiment):
                             aggregate_stats["vision_tokens_mean"] = float(np.mean(vision_token_values))
                             aggregate_stats["vision_tokens_std"] = float(np.std(vision_token_values))
                             
-                            # Selected crops statistics (per-image selection within tier)
-                            selected_crops_list = [s.get("selected_crops", 0) for s in all_per_sample]
-                            aggregate_stats["selected_crops_mean"] = float(np.mean(selected_crops_list)) if selected_crops_list else 0.0
-                            aggregate_stats["selected_crops_std"] = float(np.std(selected_crops_list)) if selected_crops_list else 0.0
+                            # Actual num_crops statistics (per-image selection within tier)
+                            actual_num_crops_list = [s.get("actual_num_crops", 0) for s in all_per_sample]
+                            aggregate_stats["selected_crops_mean"] = float(np.mean(actual_num_crops_list)) if actual_num_crops_list else 0.0
+                            aggregate_stats["selected_crops_std"] = float(np.std(actual_num_crops_list)) if actual_num_crops_list else 0.0
                             
-                            # Selected vision tokens statistics (theoretical for selected crops)
-                            selected_vision_tokens_list = [s.get("selected_vision_tokens", 0) for s in all_per_sample]
-                            aggregate_stats["selected_vision_tokens_mean"] = float(np.mean(selected_vision_tokens_list)) if selected_vision_tokens_list else 0.0
-                            aggregate_stats["selected_vision_tokens_std"] = float(np.std(selected_vision_tokens_list)) if selected_vision_tokens_list else 0.0
+                            # Target vision tokens statistics (theoretical for selected crops)
+                            target_vision_tokens_list = [s.get("target_vision_tokens", 0) for s in all_per_sample]
+                            aggregate_stats["target_vision_tokens_mean"] = float(np.mean(target_vision_tokens_list)) if target_vision_tokens_list else 0.0
+                            aggregate_stats["target_vision_tokens_std"] = float(np.std(target_vision_tokens_list)) if target_vision_tokens_list else 0.0
                             
                             # Update config_result with tier-specific statistics
                             selected_crops_distribution = {}
-                            for crops in selected_crops_list:
+                            for crops in actual_num_crops_list:
                                 selected_crops_distribution[crops] = selected_crops_distribution.get(crops, 0) + 1
                             config_result["selected_crops_distribution"] = selected_crops_distribution
                             config_result["selected_crops_mean"] = aggregate_stats["selected_crops_mean"]
                             config_result["selected_crops_std"] = aggregate_stats["selected_crops_std"]
-                            config_result["selected_vision_tokens_mean"] = aggregate_stats["selected_vision_tokens_mean"]
-                            config_result["selected_vision_tokens_std"] = aggregate_stats["selected_vision_tokens_std"]
+                            config_result["target_vision_tokens_mean"] = aggregate_stats["target_vision_tokens_mean"]
+                            config_result["target_vision_tokens_std"] = aggregate_stats["target_vision_tokens_std"]
                             config_result["actual_vision_tokens_mean"] = aggregate_stats["vision_tokens_mean"]
                             config_result["actual_vision_tokens_std"] = aggregate_stats["vision_tokens_std"]
                             
@@ -1358,13 +1354,13 @@ class CombinedProfilingExperiment(BaseExperiment):
                         )
                         with open(output_file, 'w') as f:
                             json.dump(config_result, f, indent=2)
-                        log.info(f"Saved merged results to {output_file} (merged from {self.world_size} ranks, {len(all_per_sample)} samples)")
+                        # Don't log each merged file individually - log summary at the end instead
                     
                     results = merged_results
-                    log.info(f"Merged results from {self.world_size} ranks: {len(results)} configurations, total samples: {sum(r.get('num_samples', 0) for r in results)}")
+                    # Don't log merge summary - it's redundant with completion message
                 else:
                     dist.gather_object(results, None, dst=0)
-                    log.info(f"Rank {self.rank}: Sent results to rank 0")
+                    # Don't log "Sent results" - it's expected behavior and adds clutter
             except Exception as e:
                 log.error(f"Rank {self.rank}: Failed to gather results: {e}")
                 if self.rank == 0:
@@ -1372,37 +1368,26 @@ class CombinedProfilingExperiment(BaseExperiment):
         
         # Clean up intermediate rank-specific files (only on rank 0, after all configs are saved)
         if self.rank == 0:
-            log.info(f"\n{'='*60}")
-            log.info(f"Experiment completed! Results saved:")
-            
-            # List all saved config files (exclude rank-specific intermediate files)
-            # Match files with pattern: <task_name>_imgsizetier-*_topk*_blocks*.json
+            # Log completion summary (concise)
             task_name_pattern = self.dataset_name.replace("_", "-")
             config_files = sorted(glob.glob(str(Path(self.output_dir) / f"{task_name_pattern}_imgsizetier-*_topk*_blocks*.json")))
             config_files = [f for f in config_files if "_rank" not in Path(f).name]
-            for f in config_files:
-                log.info(f"  - {Path(f).name}")
             
-            # Clean up intermediate rank-specific files (only in distributed mode)
+            log.info(f"{Colors.BRIGHT_GREEN}{'='*60}{Colors.RESET}")
+            log.info(f"{Colors.BRIGHT_GREEN}Experiment completed!{Colors.RESET}")
+            log.info(f"{Colors.CYAN}Results: {len(config_files)} configuration(s) saved to {self.output_dir}{Colors.RESET}")
+            # Clean up intermediate rank-specific files silently
             if self.is_distributed:
                 task_name_pattern = self.dataset_name.replace("_", "-")
                 intermediate_pattern = str(Path(self.output_dir) / f"{task_name_pattern}_imgsizetier-*_topk*_blocks*_rank*.json")
                 intermediate_files = glob.glob(intermediate_pattern)
-                if intermediate_files:
-                    log.info(f"\nCleaning up {len(intermediate_files)} intermediate rank files...")
-                    deleted_count = 0
-                    for f in intermediate_files:
-                        try:
-                            Path(f).unlink()
-                            deleted_count += 1
-                        except Exception as e:
-                            log.warning(f"Failed to delete {f}: {e}")
-                    log.info(f"Deleted {deleted_count}/{len(intermediate_files)} intermediate files.")
+                for f in intermediate_files:
+                    try:
+                        Path(f).unlink()
+                    except Exception:
+                        pass  # Silently ignore cleanup errors
             
-            log.info(f"Each configuration saved in separate file:")
-            log.info(f"  Format: <task_name>_imgsizetier-<tier>_crops<mean>_topk<k>_blocks<n>.json")
-            log.info(f"  Each file contains: tier info, selected_crops distribution, actual_vision_tokens statistics")
-            log.info(f"{'='*60}")
+            log.info(f"{Colors.BRIGHT_GREEN}{'='*60}{Colors.RESET}")
 
 
 def main():
@@ -1415,10 +1400,6 @@ def main():
     parser.add_argument("--tier_list", type=str, nargs="+", required=True,
                        help="List of tier names (required). Available tiers: low, medium, high. "
                             "Examples: --tier_list low medium high")
-    parser.add_argument("--resize_to_fill", action="store_true",
-                       help="If set, upscale small images to fill the target canvas (rows*224+112, cols*224+112) "
-                            "before tiling. This helps small images fully use the target vision token budget. "
-                            "Default: True (enabled by default in run() method).")
     parser.add_argument("--top_k_list", type=int, nargs="+", default=None, help="List of top_k values")
     parser.add_argument("--num_active_blocks_list", type=int, nargs="+", default=None, help="List of num_active_blocks values")
     parser.add_argument("--sampling_strategy", type=str, default="balanced",
@@ -1437,11 +1418,59 @@ def main():
     
     args = parser.parse_args()
     
-    # Setup logging
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-    )
+    # Setup logging with colors
+    # Default: Use colorlog (user has installed it)
+    # Fallback: Use RichHandler (already in project)
+    try:
+        import colorlog
+        handler = colorlog.StreamHandler(sys.stdout)
+        handler.setLevel(logging.INFO)  # Only show INFO and above by default
+        formatter = colorlog.ColoredFormatter(
+            '%(log_color)s%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+            datefmt='%Y-%m-%d %H:%M:%S',
+            log_colors={
+                'DEBUG': 'cyan',
+                'INFO': 'green',
+                'WARNING': 'yellow',
+                'ERROR': 'red',
+                'CRITICAL': 'red,bg_white',
+            }
+        )
+        handler.setFormatter(formatter)
+        root_logger = logging.getLogger()
+        root_logger.setLevel(logging.INFO)  # Root logger: INFO and above
+        root_logger.handlers = []
+        root_logger.addHandler(handler)
+        
+        # Set third-party loggers to INFO to reduce noise
+        logging.getLogger('PIL').setLevel(logging.INFO)
+        logging.getLogger('PIL.PngImagePlugin').setLevel(logging.INFO)
+        logging.getLogger('PIL.Image').setLevel(logging.INFO)
+        
+        # Only our own loggers use DEBUG
+        logging.getLogger('experiments').setLevel(logging.DEBUG)
+        logging.getLogger('molmo').setLevel(logging.DEBUG)
+    except (ImportError, Exception):
+        # Fallback to RichHandler (already in project)
+        from molmo.util import SafeRichHandler
+        handler = SafeRichHandler()
+        handler.setLevel(logging.INFO)  # Only show INFO and above by default
+        root_logger = logging.getLogger()
+        root_logger.setLevel(logging.INFO)  # Root logger: INFO and above
+        root_logger.handlers = []
+        root_logger.addHandler(handler)
+        
+        # Set third-party loggers to INFO to reduce noise
+        logging.getLogger('PIL').setLevel(logging.INFO)
+        logging.getLogger('PIL.PngImagePlugin').setLevel(logging.INFO)
+        logging.getLogger('PIL.Image').setLevel(logging.INFO)
+        
+        # Only our own loggers use DEBUG
+        logging.getLogger('experiments').setLevel(logging.DEBUG)
+        logging.getLogger('molmo').setLevel(logging.DEBUG)
+    
+    # Our own logger can use DEBUG
+    log.setLevel(logging.DEBUG)
     
     # Create experiment
     experiment = CombinedProfilingExperiment(
@@ -1453,10 +1482,6 @@ def main():
     )
     
     # Run experiment
-    # resize_to_fill: default is True (if --resize_to_fill is not passed, args.resize_to_fill is False,
-    # but we want default True, so we use args.resize_to_fill if passed, otherwise True)
-    resize_to_fill_value = args.resize_to_fill if args.resize_to_fill else True
-    
     experiment.run(
         dataset_name=args.dataset_name,
         split=args.split,
@@ -1469,10 +1494,14 @@ def main():
         num_runs_per_sample=args.num_runs_per_sample,
         use_profiler=args.use_profiler,
         use_profiler_on_all_samples=args.use_profiler_on_all_samples,
-        resize_to_fill=resize_to_fill_value,
     )
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    finally:
+        # Clean up distributed process group to avoid warnings
+        if dist.is_initialized():
+            dist.destroy_process_group()
 

@@ -1633,15 +1633,23 @@ class MolmoPretrainedVisionBackbone(MolmoVisionBackbone):
         return image_features, cls_embed
     
     def forward(self, images: torch.Tensor, image_masks: torch.Tensor) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        import logging
+        log = logging.getLogger(__name__)
+        
         cfg = self.config
 
         # image_features: (batch_size, num_crops(=num_image), num_patch, nximage_emb_dim)
         batch_size, num_image = images.shape[:2]
+        log.debug(f"[vision_backbone.forward] STEP 1: Input images shape: {images.shape} (batch_size={batch_size}, num_image={num_image})")
+        
         image_features, cls_embed = self.encode_image(images)
+        log.debug(f"[vision_backbone.forward] STEP 2: After encode_image: image_features shape={image_features.shape}, cls_embed shape={cls_embed.shape if cls_embed is not None else None}")
 
         og_dtype = image_features.dtype
         if cfg.image_padding_embed:
             assert image_masks is not None
+            n_pad_patches = (image_masks == 0).sum().item() if image_masks is not None else 0
+            log.debug(f"[vision_backbone.forward] STEP 3: Applying padding embed: {n_pad_patches} fully padded patches detected")
             if cfg.image_padding_embed == "pad_embed":
                 all_pad = (image_masks == 0).to(dtype=torch.float32)
                 pad_embed = self.pad_embed[None, None, None, :]
@@ -1668,6 +1676,7 @@ class MolmoPretrainedVisionBackbone(MolmoVisionBackbone):
         image_features = image_features.reshape(
             (batch_size, num_image) + cfg.vision_backbone.image_num_patch + (-1,),
         )
+        log.debug(f"[vision_backbone.forward] STEP 4: After reshape: image_features shape={image_features.shape}")
 
         if cfg.vision_backbone.image_num_patch[0] % cfg.image_pooling_h == 1:
             # Pad so we can still pool 2x2 patches
@@ -1675,14 +1684,17 @@ class MolmoPretrainedVisionBackbone(MolmoVisionBackbone):
                 image_features,
                 (0, 0, 0, 1, 0, 1, 0, 0, 0, 0),
             )
+            log.debug(f"[vision_backbone.forward] STEP 5: Padded for pooling: image_features shape={image_features.shape}")
         
         # image pooling
+        image_features_before_pooling = image_features.shape
         image_features = einops.rearrange(
             image_features,
             'b n (h dh) (w dw) c -> (b n h w) (dh dw) c',
             dh=cfg.image_pooling_h,
             dw=cfg.image_pooling_w,
         )
+        log.debug(f"[vision_backbone.forward] STEP 6: Before pooling: {image_features_before_pooling}, after rearrange: {image_features.shape}")
 
         if cfg.image_pooling_2d == ImagePooling2DType.attention_meanq:
             query = image_features.mean(-2, keepdim=True)
@@ -1691,9 +1703,12 @@ class MolmoPretrainedVisionBackbone(MolmoVisionBackbone):
             image_features = self.image_pooling_2d(image_features)
         elif cfg.image_pooling_2d not in {ImagePooling2DType.none, ImagePooling2DType.stack}:
             image_features = self.image_pooling_2d(image_features[:, :1, :], image_features)
+        
+        log.debug(f"[vision_backbone.forward] STEP 7: After pooling_2d: image_features shape={image_features.shape}")
 
         h, w = cfg.llm_patches_per_crop
         image_features = image_features.reshape(batch_size, num_image, h * w, -1)
+        log.debug(f"[vision_backbone.forward] STEP 8: Final image_features shape: {image_features.shape} (batch_size={batch_size}, num_image={num_image}, patches_per_crop={h*w})")
 
         # MLP layer to map the feature.
         if cfg.image_projector == ImageProjectType.mlpx2:
@@ -1910,15 +1925,27 @@ class MolmoModel(MolmoPretrainedModel):
 
         num_image: Optional[int] = None
         if images is not None:
+            import logging
+            log = logging.getLogger(__name__)
+            
+            log.debug(f"[MolmoModel.forward] STEP 1: Processing images: images shape={images.shape}, image_input_idx shape={image_input_idx.shape}, seq_len={seq_len}")
+            
             # shape: (batch_size, num_image, num_patch, d_model)
             # cls_embed: (batch_size, num_image, d_model)
             image_features, cls_embed = self.vision_backbone(images, image_masks)
             num_image, num_patch = image_features.shape[1:3]
             assert image_input_idx.shape == (batch_size, num_image, num_patch)
+            
+            log.debug(f"[MolmoModel.forward] STEP 2: After vision_backbone: image_features shape={image_features.shape}, num_image={num_image}, num_patch={num_patch}")
 
             # inster the image feature into the embedding.
             image_features = image_features.view(batch_size, num_image * num_patch, -1)
             image_input_idx = image_input_idx.view(batch_size, num_image * num_patch)
+
+            n_valid_indices = (image_input_idx >= 0).sum().item()
+            n_invalid_indices = (image_input_idx < 0).sum().item()
+            log.debug(f"[MolmoModel.forward] STEP 3: Flattened: image_features shape={image_features.shape}, image_input_idx shape={image_input_idx.shape}")
+            log.debug(f"[MolmoModel.forward] STEP 3: Valid indices: {n_valid_indices}, Invalid indices (marked as -100): {n_invalid_indices}")
 
             x_flat = x.view(batch_size * seq_len, -1)
             image_flat = image_features.to(x.device)
@@ -1929,8 +1956,19 @@ class MolmoModel(MolmoPretrainedModel):
                 * seq_len
             )
             linear_idx = (batch_offsets + image_input_idx).view(-1)
+
+            # Check for out-of-bounds indices
+            max_valid_idx = batch_size * seq_len - 1
+            n_oob = (linear_idx > max_valid_idx).sum().item()
+            if n_oob > 0:
+                log.warning(f"[MolmoModel.forward] STEP 4: Found {n_oob} out-of-bounds indices (max_valid={max_valid_idx})")
+            else:
+                log.debug(f"[MolmoModel.forward] STEP 4: All indices valid (max_idx={linear_idx.max().item()}, max_valid={max_valid_idx})")
+
             x_flat.index_add_(0, linear_idx, image_flat)
             x = x_flat.view(batch_size, seq_len, -1)
+            
+            log.debug(f"[MolmoModel.forward] STEP 5: After inserting image features: x shape={x.shape}")
 
             if self.config.use_cls_feature:
                 x = torch.cat([x[:, :1], cls_embed, x[:, 1:-num_image]], dim=1)

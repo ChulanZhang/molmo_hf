@@ -299,13 +299,13 @@ def dino_resize_and_pad(
     return resized, image_mask
 
 
-def select_tiling(h, w, patch_size, max_num_crops, tier=None):
+def select_tiling(h, w, patch_size, max_num_crops, tier=None, original_h=None, original_w=None):
     """
     Select optimal tiling configuration for an image.
     
     Args:
-        h: Image height (after subtracting margins)
-        w: Image width (after subtracting margins)
+        h: Image height (after subtracting margins, used for size calculations)
+        w: Image width (after subtracting margins, used for size calculations)
         patch_size: Crop window size (e.g., 224)
         max_num_crops: Maximum number of crops allowed
         tier: Optional dict with keys:
@@ -315,22 +315,68 @@ def select_tiling(h, w, patch_size, max_num_crops, tier=None):
             - mismatch_threshold: Maximum acceptable mismatch for preferred crops (default: 0.3)
             If provided, selects best crop count within tier range based on aspect ratio.
             If None, uses adaptive selection based on image size.
+        original_h: Original image height (before subtracting margins). If provided, used for aspect ratio calculation.
+        original_w: Original image width (before subtracting margins). If provided, used for aspect ratio calculation.
     
     Returns:
         (rows, cols) tiling configuration
     """
-    aspect_ratio = w / h if h > 0 else 1.0
+    # Use original aspect ratio if provided (margins shouldn't affect aspect ratio matching)
+    # Otherwise fall back to adjusted dimensions
+    if original_h is not None and original_w is not None and original_h > 0:
+        aspect_ratio = original_w / original_h
+    else:
+        aspect_ratio = w / h if h > 0 else 1.0
     
     # Tier-based selection: find best crop count within tier range
     if tier is not None:
         min_crops = tier.get("min_crops", 1)
-        max_crops_in_tier = min(tier.get("max_crops", max_num_crops), max_num_crops)
+        tier_max_crops = tier.get("max_crops", max_num_crops)
+        # Ensure tier range is valid: max_crops_in_tier must be >= min_crops
+        # If max_num_crops is smaller than min_crops, we need to adjust
+        if max_num_crops < min_crops:
+            # If max_num_crops is too small, we can't satisfy tier min_crops requirement
+            # In this case, we should still try to use tier constraints but adjust the range
+            # However, this is a configuration error - warn and use max_num_crops as upper bound
+            import warnings
+            warnings.warn(
+                f"max_num_crops ({max_num_crops}) is smaller than tier min_crops ({min_crops}). "
+                f"Adjusting tier range to [{max_num_crops}, {max_num_crops}]."
+            )
+            min_crops = max_num_crops
+            max_crops_in_tier = max_num_crops
+        else:
+            # Normal case: use tier constraints, but respect max_num_crops limit
+            max_crops_in_tier = min(tier_max_crops, max_num_crops)
+            # Ensure min_crops doesn't exceed max_crops_in_tier
+            if min_crops > max_crops_in_tier:
+                min_crops = max_crops_in_tier
         preferred_crops = tier.get("preferred_crops", [])
         mismatch_threshold = tier.get("mismatch_threshold", 0.3)
+        
+        # Helper function to check if a number is prime (has only 2 factors: 1 and itself)
+        def is_prime(n):
+            """Check if a number is prime."""
+            if n < 2:
+                return False
+            if n == 2:
+                return True
+            if n % 2 == 0:
+                return False
+            for i in range(3, int(n**0.5) + 1, 2):
+                if n % i == 0:
+                    return False
+            return True
         
         # Helper function to find best tiling for a given crop count
         def find_best_tiling_for_crops(crops):
             """Find best tiling for a specific crop count based on aspect ratio."""
+            # Skip prime crops (except 2, which can be 1×2 or 2×1, acceptable)
+            # Prime crops like 3, 5, 7, 11 can only be decomposed as (1, n) or (n, 1),
+            # which are extreme aspect ratios and should be avoided
+            if crops > 2 and is_prime(crops):
+                return None, float('inf')
+            
             tilings = []
             for i in range(1, crops + 1):
                 if crops % i == 0:
@@ -356,39 +402,142 @@ def select_tiling(h, w, patch_size, max_num_crops, tier=None):
         best_tiling = None
         best_mismatch = float('inf')
         
+        # Debug: track all mismatches for analysis
+        tier_mismatches = {}  # crops -> mismatch for tier range
+        all_mismatches = {}  # crops -> mismatch for all crops (for debugging)
+        
         # First, try preferred crop counts
         for crops in preferred_crops:
             if crops < min_crops or crops > max_crops_in_tier:
                 continue
             tiling, mismatch = find_best_tiling_for_crops(crops)
-            if tiling is not None and mismatch < best_mismatch:
-                best_mismatch = mismatch
-                best_crops = crops
-                best_tiling = tiling
+            if tiling is not None:
+                tier_mismatches[crops] = mismatch
+                all_mismatches[crops] = mismatch
+                if mismatch < best_mismatch:
+                    best_mismatch = mismatch
+                    best_crops = crops
+                    best_tiling = tiling
         
-        # If mismatch is acceptable, return preferred crop
-        if best_mismatch < mismatch_threshold and best_tiling is not None:
-            return best_tiling
-        
-        # Otherwise, try all crop counts in tier range
+        # Try all crop counts in tier range (including non-preferred ones)
+        # This ensures we find the best option within tier, not just preferred ones
         for crops in range(min_crops, max_crops_in_tier + 1):
             if crops in preferred_crops:
                 continue  # Already tried
             tiling, mismatch = find_best_tiling_for_crops(crops)
-            if tiling is not None and mismatch < best_mismatch:
-                best_mismatch = mismatch
-                best_crops = crops
-                best_tiling = tiling
+            if tiling is not None:
+                tier_mismatches[crops] = mismatch
+                all_mismatches[crops] = mismatch
+                if mismatch < best_mismatch:
+                    best_mismatch = mismatch
+                    best_crops = crops
+                    best_tiling = tiling
         
-        # Return best found, or fallback to smallest tiling in tier
+        # Return best found in tier range
         if best_tiling is not None:
+            # Import logging here to avoid circular imports
+            import logging
+            log = logging.getLogger(__name__)
+            tier_name = tier.get('name', 'unknown')
+            
+            # Always log tier selection details for debugging (especially for high tier)
+            # This helps understand why certain crops are selected
+            log.debug(
+                f"[select_tiling] Sample tier={tier_name} (min={min_crops}, max={max_crops_in_tier}), "
+                f"image_aspect_ratio={aspect_ratio:.4f}, "
+                f"tier_range_mismatches={tier_mismatches}, "
+                f"best_in_tier: {best_crops} crops (mismatch={best_mismatch:.4f})"
+            )
+            
+            # If tier range mismatch is too large (e.g., >0.5), consider relaxing tier constraint
+            # to avoid severe distortion. This allows using crops outside tier if they match much better.
+            tier_relaxation_threshold = tier.get("tier_relaxation_threshold", 0.5)
+            if best_mismatch > tier_relaxation_threshold:
+                # Tier range mismatch is large, try all possible crops to find better match
+                best_crops_outside = None
+                best_tiling_outside = None
+                best_mismatch_outside = float('inf')
+                outside_mismatches = {}
+                
+                for crops in range(1, max_num_crops + 1):
+                    if min_crops <= crops <= max_crops_in_tier:
+                        continue  # Already tried in tier range
+                    tiling, mismatch = find_best_tiling_for_crops(crops)
+                    if tiling is not None:
+                        outside_mismatches[crops] = mismatch
+                        all_mismatches[crops] = mismatch
+                        if mismatch < best_mismatch_outside:
+                            best_mismatch_outside = mismatch
+                            best_crops_outside = crops
+                            best_tiling_outside = tiling
+                
+                # Log tier relaxation evaluation
+                log.debug(
+                    f"[select_tiling] tier={tier_name} (min={min_crops}, max={max_crops_in_tier}) tier_relaxation triggered: "
+                    f"best_mismatch_in_tier={best_mismatch:.4f} > {tier_relaxation_threshold}, "
+                    f"image_aspect_ratio={aspect_ratio:.3f}, "
+                    f"tier_range_mismatches={tier_mismatches}, "
+                    f"outside_mismatches={outside_mismatches}, "
+                    f"best_in_tier: {best_crops} crops (mismatch={best_mismatch:.4f}), "
+                    f"best_outside: {best_crops_outside} crops (mismatch={best_mismatch_outside:.4f})"
+                )
+                
+                # Use tier range if outside tier doesn't provide significantly better match
+                # (difference < 0.1), otherwise use outside tier to avoid distortion
+                # BUT: Only allow relaxation if the outside tier match is MUCH better (difference > 0.2)
+                # and the outside tier mismatch is still reasonable (< 0.3)
+                # This prevents high tier from frequently selecting low/medium tier crops
+                if (best_tiling_outside is not None and 
+                    best_mismatch_outside < best_mismatch - 0.2 and 
+                    best_mismatch_outside < 0.3):
+                    # Outside tier has significantly better match AND it's still reasonable, use it
+                    final_crops = best_crops_outside
+                    final_tiling = best_tiling_outside
+                    log.warning(
+                        f"[select_tiling] Tier relaxation ACCEPTED: tier={tier_name} (min={min_crops}, max={max_crops_in_tier}) "
+                        f"selected {best_crops_outside} crops (outside tier) instead of {best_crops} crops (in tier). "
+                        f"Mismatch: {best_mismatch_outside:.4f} (outside) vs {best_mismatch:.4f} (in tier). "
+                        f"Image aspect_ratio={aspect_ratio:.4f}. "
+                        f"All mismatches: {all_mismatches}"
+                    )
+                else:
+                    # Otherwise, use tier range (even if mismatch is large, to respect tier constraint)
+                    final_crops = best_crops
+                    final_tiling = best_tiling
+                    log.debug(
+                        f"[select_tiling] Tier relaxation REJECTED: tier={tier_name} "
+                        f"outside mismatch improvement ({best_mismatch:.4f} - {best_mismatch_outside:.4f} = {best_mismatch - best_mismatch_outside:.4f}) "
+                        f"< 0.2 OR outside mismatch ({best_mismatch_outside:.4f}) >= 0.3. "
+                        f"Using tier range: {best_crops} crops (mismatch={best_mismatch:.4f})"
+                    )
+                # Log final selection
+                log.debug(
+                    f"[select_tiling] FINAL SELECTION: tier={tier_name}, "
+                    f"selected {final_crops} crops (tiling={final_tiling}), "
+                    f"image_aspect_ratio={aspect_ratio:.4f}"
+                )
+                return final_tiling
+            else:
+                # Tier range has acceptable match, use it
+                log.debug(
+                    f"[select_tiling] FINAL SELECTION: tier={tier_name}, "
+                    f"selected {best_crops} crops (tiling={best_tiling}), "
+                    f"image_aspect_ratio={aspect_ratio:.4f}, "
+                    f"mismatch={best_mismatch:.4f} (acceptable, <= {tier_relaxation_threshold})"
+                )
             return best_tiling
-        # Fallback: use smallest tiling in tier
-        fallback_tiling, _ = find_best_tiling_for_crops(min_crops)
+        # Fallback: use smallest tiling in tier (but ensure it's within max_num_crops)
+        # If min_crops > max_num_crops, we can't satisfy tier requirement, so use max_num_crops
+        fallback_crops = min(min_crops, max_num_crops)
+        fallback_tiling, _ = find_best_tiling_for_crops(fallback_crops)
         if fallback_tiling is not None:
             return fallback_tiling
-        # Last resort: use (1, min_crops)
-        return (1, min_crops)
+        # Last resort: use (1, fallback_crops) or (1, 1) if fallback_crops is too large
+        if fallback_crops <= max_num_crops:
+            return (1, fallback_crops)
+        else:
+            # If even fallback_crops is too large, use the largest valid tiling
+            return (1, max_num_crops)
     
     # Original adaptive selection logic (when tier is None)
     # Generate all possible tilings up to max_num_crops
@@ -474,7 +623,7 @@ class MultiModalPreprocessor:
     normalize: str = "openai"
     crop_mode: str = "resize"
     # max_crops: int = 6
-    max_crops: int = 12
+    max_crops: int = 15
     tier: Optional[Dict[str, Any]] = None  # Tier configuration for adaptive crop selection
     overlap_margins: Tuple[int, int] = (4, 4)
     resize: str = "default"
@@ -492,10 +641,6 @@ class MultiModalPreprocessor:
     # count matches theoretical (num_crops+1)*144 even with overlap.
     force_full_tokens: bool = False
     pad_value: float = 0
-    # If True, resize to fill the target canvas (upscale small images),
-    # then center-crop/pad to the desired size. Useful to better match
-    # the target tiling and reduce invalid tokens when force_full_tokens=False.
-    resize_to_fill: bool = False
 
     image_patch_token_id: int = dataclasses.field(init=False)
     image_col_token_id: int = dataclasses.field(init=False)
@@ -531,15 +676,12 @@ class MultiModalPreprocessor:
         elif self.resize == "metaclip":
             return metaclip_resize(image, output_size)
         else:
+            # Always use resize_and_crop_to_fill to ensure small images are upscaled
+            # to fill the target canvas, fully utilizing the vision token budget
             resize = "torch-bilinear" if self.resize == "default" else self.resize
-            if self.resize_to_fill:
-                return resize_and_crop_to_fill(
-                    image, output_size, pad_value=self.pad_value, rng=rng, is_training=is_training,
-                    resize_method=resize)
-            else:
-                return resize_and_pad(
-                    image, output_size, pad_value=self.pad_value, rng=rng, is_training=is_training,
-                    resize_method=resize)
+            return resize_and_crop_to_fill(
+                image, output_size, pad_value=self.pad_value, rng=rng, is_training=is_training,
+                resize_method=resize)
 
     def image_to_patches_and_tokens(
         self,
@@ -547,6 +689,9 @@ class MultiModalPreprocessor:
         is_training=False,
         rng=None
     ):
+        import logging
+        log = logging.getLogger(__name__)
+        
         max_crops = self.max_crops
         overlap_margins = self.overlap_margins
         base_image_input_size = self.base_image_input_size
@@ -564,6 +709,9 @@ class MultiModalPreprocessor:
 
         original_image_h, original_image_w = image.shape[:2]
         crop_size = base_image_input_size[0]
+        
+        log.debug(f"[image_to_patches_and_tokens] STEP 1: Original image size: {original_image_w}x{original_image_h} (width x height)")
+        log.debug(f"[image_to_patches_and_tokens] STEP 1: max_crops={max_crops}, tier={self.tier}, crop_mode={self.crop_mode}")
 
         if self.crop_mode == "resize":
             resized, img_mask = self.resize_image(image, base_image_input_size, is_training, rng)
@@ -585,6 +733,7 @@ class MultiModalPreprocessor:
                 [self.image_end_token_id],
             ]
             joint = np.concatenate(joint, 0, dtype=np.int32)
+            log.debug(f"[image_to_patches_and_tokens] STEP 2: Resize mode - single crop, patches shape: {patches.shape}")
             return np.expand_dims(patches, 0), joint, None, img_mask
         if self.crop_mode == "overlap-and-resize-c2":
             # Discard this many patches from the (left/top, right/bottom) of crops
@@ -597,26 +746,112 @@ class MultiModalPreprocessor:
             crop_window_patches = crop_patches - (right_margin + left_margin)  # usable patches
             crop_window_size = crop_window_patches * base_image_input_d
 
+            log.debug(f"[image_to_patches_and_tokens] STEP 2: Calculating tiling parameters")
+            log.debug(f"[image_to_patches_and_tokens] STEP 2:   total_margin_pixels={total_margin_pixels}, crop_window_size={crop_window_size}")
+            log.debug(f"[image_to_patches_and_tokens] STEP 2:   adjusted image size for tiling: {(original_image_h - total_margin_pixels)}x{(original_image_w - total_margin_pixels)}")
+
             # Decide how to tile the image, to account for the overlap margins we compute the tiling
             # as if we had an image without the margins and were using a crop size without the margins
+            # However, use original image aspect ratio for matching (margins shouldn't affect aspect ratio)
             tiling = select_tiling(
                 original_image_h - total_margin_pixels,
                 original_image_w - total_margin_pixels,
                 crop_window_size,
                 max_crops,
-                tier=self.tier
+                tier=self.tier,
+                original_h=original_image_h,
+                original_w=original_image_w
             )
+            n_crops = tiling[0] * tiling[1]
+            log.debug(f"[image_to_patches_and_tokens] STEP 3: Tiling selected: {tiling} (rows={tiling[0]}, cols={tiling[1]}) -> {n_crops} crops")
+            log.debug(f"[image_to_patches_and_tokens] STEP 3: Target resize size: {tiling[0]*crop_window_size+total_margin_pixels}x{tiling[1]*crop_window_size+total_margin_pixels} (height x width)")
+            
             src, img_mask = self.resize_image(
                 image,
                 [tiling[0]*crop_window_size+total_margin_pixels, tiling[1]*crop_window_size+total_margin_pixels],
                 is_training,
                 rng
             )
+            log.debug(f"[image_to_patches_and_tokens] STEP 4: Image resized and padded: {src.shape[0]}x{src.shape[1]} (height x width)")
             src = self._normalize(src)
 
             # Now we have to split the image into crops, while keeping track of how each patch in the
             # each crop should be ordered in the global image, this require a lot of tricky booking
-            n_crops = tiling[0] * tiling[1]
+            patches_arr = []
+            mask_arr = []
+            patch_ordering_arr = []
+
+            # We assume hxw pooling, but can allow padding the right/bottom with extra
+            # patches if the number of patches per side is not divisible by h/w
+            assert (crop_patches + self.image_pooling_h - 1) // self.image_pooling_h == image_token_length_h
+            assert (crop_patches + self.image_pooling_w - 1) // self.image_pooling_w == image_token_length_w
+            on = 0
+            on_patch = 0
+            log.debug(f"[image_to_patches_and_tokens] STEP 5: Splitting into {n_crops} crops (tiling: {tiling[0]} rows x {tiling[1]} cols)")
+            for i in range(tiling[0]):
+                y0 = i*crop_window_size
+                if i == 0:
+                    crop_y0 = 0
+                else:
+                    crop_y0 = left_margin // self.image_pooling_h
+
+                crop_h = image_base_patch_h - (right_margin + left_margin)
+                if i == 0:
+                    crop_h += left_margin
+                if i == (tiling[0]-1):
+                    crop_h += right_margin
+                for j in range(tiling[1]):
+                    x0 = j*crop_window_size
+                    if j == 0:
+                        crop_x0 = 0
+                    else:
+                        crop_x0 = left_margin // self.image_pooling_w
+
+                    crop_w = image_base_patch_w - (right_margin + left_margin)
+                    if j == 0:
+                        crop_w += left_margin
+                    if j == (tiling[1]-1):
+                        crop_w += right_margin
+
+                    pooled_w = (crop_w + self.image_pooling_w - 1) // self.image_pooling_w
+                    pooled_h = (crop_h + self.image_pooling_h - 1) // self.image_pooling_h
+                    after_padding_width = image_token_length_w - pooled_w - crop_x0
+                    after_padding_height = image_token_length_h - pooled_h - crop_y0
+                    
+                    log.debug(f"[image_to_patches_and_tokens] STEP 5: Crop ({i},{j}): position=({y0},{x0}), size={crop_size}x{crop_size}, "
+                             f"pooled={pooled_h}x{pooled_w}, padding=({crop_y0},{after_padding_height})x({crop_x0},{after_padding_width})")
+                    
+                    if self.force_full_tokens:
+                        # Force full 12x12 tokens: assign indices to padded positions too
+                        full_tokens = image_token_length_h * image_token_length_w  # 12*12=144
+                        patch_ordering_arr.append(
+                            np.reshape(
+                                np.arange(on, on + full_tokens, dtype=np.int32),
+                                (image_token_length_h, image_token_length_w)
+                            )
+                        )
+                        # For masks, mark all tokens as valid (padding treated as valid tokens)
+                        mask_arr.append(np.ones((crop_size, crop_size), dtype=np.float32))
+                        patches_arr.append(src[y0:y0+crop_size, x0:x0+crop_size])
+                        on += full_tokens
+                        log.debug(f"[image_to_patches_and_tokens] STEP 5: Crop ({i},{j}): force_full_tokens=True -> {full_tokens} tokens (all valid)")
+                    else:
+                        valid_patches = pooled_h * pooled_w
+                        patch_ordering_arr.append(
+                            np.pad(
+                                np.reshape(
+                                    np.arange(on, on+valid_patches, dtype=np.int32),
+                                    (pooled_h, pooled_w)),
+                                [[crop_y0, after_padding_height], [crop_x0, after_padding_width]],
+                                constant_values=-1, mode='constant'
+                            )
+                        )
+                        patches_arr.append(src[y0:y0+crop_size, x0:x0+crop_size])
+                        mask_arr.append(img_mask[y0:y0+crop_size, x0:x0+crop_size])
+                        on += valid_patches
+                        invalid_patches = (image_token_length_h * image_token_length_w) - valid_patches
+                        log.debug(f"[image_to_patches_and_tokens] STEP 5: Crop ({i},{j}): force_full_tokens=False -> {valid_patches} valid patches, {invalid_patches} invalid (padding/margins)")
+                    on_patch += 1
             patches_arr = []
             mask_arr = []
             patch_ordering_arr = []
@@ -686,6 +921,8 @@ class MultiModalPreprocessor:
             patches = np.stack(patches_arr)
             patch_ordering = np.stack(patch_ordering_arr)
             img_mask = np.stack(mask_arr)
+            
+            log.debug(f"[image_to_patches_and_tokens] STEP 6: Stacked crops: patches shape={patches.shape}, patch_ordering shape={patch_ordering.shape}")
 
             # Switch to [n_crops, n_patches, pixels_per_patch] format
             image_layout_impatch_w, image_layout_impatch_h = tiling[0], tiling[1]
@@ -695,6 +932,10 @@ class MultiModalPreprocessor:
             img_mask = img_mask.astype(np.float32).mean(axis=-1)
             patch_ordering = np.reshape(patch_ordering, [-1])
             valid = patch_ordering >= 0
+            
+            n_valid_patches = valid.sum()
+            n_invalid_patches = (~valid).sum()
+            log.debug(f"[image_to_patches_and_tokens] STEP 7: After reshaping patch_ordering: {n_valid_patches} valid patches, {n_invalid_patches} invalid patches (marked as -1)")
 
             # Path order numbers the patches crop-by-crop, here we transpose
             # it to get left-to-right order
@@ -708,6 +949,8 @@ class MultiModalPreprocessor:
             # The transpose will screw up which patches are masked, project the
             # new order into sparse structure of `patch_ordering` to fix it
             patch_ordering[valid] = patch_ordering_rh[patch_ordering_rh >= 0]
+            
+            log.debug(f"[image_to_patches_and_tokens] STEP 8: After transpose (crop-by-crop -> left-to-right): {n_valid_patches} valid patches remain")
 
             def get_num_patches(num_tiles: int, pooling_size: int) -> int:
                 if num_tiles > 1:
@@ -760,6 +1003,8 @@ class MultiModalPreprocessor:
             resized = self._normalize(resized)
             resized = pixels_to_patches(resized, image_patch_size)
             patches = np.concatenate([np.expand_dims(resized, 0), patches], 0)
+            
+            log.debug(f"[image_to_patches_and_tokens] STEP 9: Added global image: patches shape={patches.shape} (1 global + {n_crops} crops)")
 
             # Global image goes first, so the order of patches in previous crops gets increased
             patch_ordering = np.where(
@@ -768,6 +1013,12 @@ class MultiModalPreprocessor:
                 -1
             )
             patch_ordering = np.concatenate([np.arange(0, tokens_per_image), patch_ordering], 0)
+            
+            total_patches = len(patch_ordering)
+            total_valid = (patch_ordering >= 0).sum()
+            total_invalid = (patch_ordering < 0).sum()
+            log.debug(f"[image_to_patches_and_tokens] STEP 10: Final patch_ordering: {total_patches} total patches ({total_valid} valid, {total_invalid} invalid)")
+            log.debug(f"[image_to_patches_and_tokens] STEP 10: Expected valid patches: {tokens_per_image} (global) + {n_valid_patches} (crops) = {tokens_per_image + n_valid_patches}")
             per_row = np.full(
                 (image_token_length_w,),
                 self.image_patch_token_id,
@@ -784,9 +1035,39 @@ class MultiModalPreprocessor:
 
             joint = np.concatenate(joint, 0)
             img_mask = np.pad(img_mask, [[0, 1], [0, 0]], constant_values=-1)
-            return patches, joint, patch_ordering, img_mask
+            # Return tiling information along with other outputs
+            return patches, joint, patch_ordering, img_mask, tiling
         else:
             raise NotImplementedError(self.crop_mode)
+    
+    def preprocess(self, image, is_training: bool, rng=None):
+        """Preprocesses a single image
+
+        Returns:
+            crops: (n_crops, n_patches, patch_dim) individual crops, `n_crops` might
+                   change between images but the other dimension are fixed
+            tokens: (n_tokens,) int32 tokens, pad tokens indicate where to insert the
+                                patch features, might include other special tokens as well
+            image_idx: (n_crops, n_patches) index in `tokens` to put the patch features from the
+                       crops after pooling, negative values indicates patches features to exclude
+            padding_mask: (n_crops, n_patches) what percent of each crop is padding, can be None
+                          if the image mask is not being used.
+            tiling: (rows, cols) tiling configuration used for this image
+        """
+        result = self.image_to_patches_and_tokens(
+            image, is_training, rng)
+        if len(result) == 5:
+            # New format: includes tiling
+            crops, image_tokens, patch_ordering, img_mask, tiling = result
+        else:
+            # Old format: no tiling (backward compatibility)
+            crops, image_tokens, patch_ordering, img_mask = result
+            tiling = None
+        patch_idx = self.build_image_input_idx(
+            image_tokens,
+            patch_ordering,
+        )
+        return crops, image_tokens, patch_idx, img_mask, tiling
 
     def build_image_input_idx(
         self,
@@ -794,12 +1075,16 @@ class MultiModalPreprocessor:
         patch_order: np.ndarray,
     ):
         """Converts `patch_order` into an array mapping patch_id -> token_position"""
+        import logging
+        log = logging.getLogger(__name__)
+        
         tokens_per_image = self.image_token_length_w * self.image_token_length_h
 
         image_input_idx = image_tokens == self.image_patch_token_id
         image_input_idx = np.nonzero(image_input_idx)[0].astype(np.int32)
 
         n_tokens = image_input_idx.shape[0]
+        log.debug(f"[build_image_input_idx] STEP 1: Found {n_tokens} image patch tokens in image_tokens sequence")
 
         # Fast path for force_full_tokens: we already constructed a dense grid of
         # tokens_per_image per (global + crop), so just reshape directly.
@@ -809,6 +1094,7 @@ class MultiModalPreprocessor:
             total_tokens = n_images * tokens_per_image
             image_input_idx = image_input_idx[:total_tokens]
             image_input_idx = np.reshape(image_input_idx, [-1, tokens_per_image])
+            log.debug(f"[build_image_input_idx] STEP 2: force_full_tokens=True -> image_input_idx shape={image_input_idx.shape} (n_images={n_images}, including global)")
             return image_input_idx
 
         if patch_order is not None:
@@ -817,7 +1103,11 @@ class MultiModalPreprocessor:
 
             valid = patch_order >= 0
             n_valid_patches = valid.sum()
+            n_invalid_patches = (~valid).sum()
             assert len(image_input_idx) == n_valid_patches
+            
+            log.debug(f"[build_image_input_idx] STEP 2: patch_order: {n_patches} total patches ({n_valid_patches} valid, {n_invalid_patches} invalid)")
+            log.debug(f"[build_image_input_idx] STEP 2: image_input_idx has {len(image_input_idx)} tokens (should match {n_valid_patches} valid patches)")
 
             # Get the reversed mapping of patch order (so instead of sorted position->patch_idx we
             # want patch_idx->sorted position)
@@ -834,8 +1124,15 @@ class MultiModalPreprocessor:
             valid = (sorted_patch_ixs_ex >= 0).astype(np.int32)
             image_input_idx = image_input_idx[sorted_patch_ixs_ex*valid]
             image_input_idx = image_input_idx*valid - 100*(1 - valid)
+            
+            n_valid_in_idx = (image_input_idx >= 0).sum()
+            n_invalid_in_idx = (image_input_idx < 0).sum()
+            log.debug(f"[build_image_input_idx] STEP 3: After mapping: {n_valid_in_idx} valid indices (>=0), {n_invalid_in_idx} invalid indices (marked as -100)")
 
         image_input_idx = np.reshape(image_input_idx, [-1, tokens_per_image])
+        n_crops_plus_global = image_input_idx.shape[0]
+        n_actual_crops = n_crops_plus_global - 1  # Subtract 1 for global image
+        log.debug(f"[build_image_input_idx] STEP 4: Final image_input_idx shape={image_input_idx.shape} -> {n_actual_crops} crops + 1 global = {n_crops_plus_global} total")
         return image_input_idx
 
     def preprocess(self, image, is_training: bool, rng=None):
@@ -850,14 +1147,22 @@ class MultiModalPreprocessor:
                        crops after pooling, negative values indicates patches features to exclude
             padding_mask: (n_crops, n_patches) what percent of each crop is padding, can be None
                           if the image mask is not being used.
+            tiling: (rows, cols) tiling configuration used for this image
         """
-        crops, image_tokens, patch_ordering, img_mask = self.image_to_patches_and_tokens(
+        result = self.image_to_patches_and_tokens(
             image, is_training, rng)
+        if len(result) == 5:
+            # New format: includes tiling
+            crops, image_tokens, patch_ordering, img_mask, tiling = result
+        else:
+            # Old format: no tiling (backward compatibility)
+            crops, image_tokens, patch_ordering, img_mask = result
+            tiling = None
         patch_idx = self.build_image_input_idx(
             image_tokens,
             patch_ordering,
         )
-        return crops, image_tokens, patch_idx, img_mask
+        return crops, image_tokens, patch_idx, img_mask, tiling
 
     def __call__(
         self,
@@ -976,9 +1281,19 @@ class MultiModalPreprocessor:
         all_subsegments = []
         all_loss_masks = []
 
+        # Store tiling information for each image (for metadata)
+        image_tilings = []
         for ix in range(n):
             token_ix = image_idx[ix]
-            crops, image_tokens, patch_idx, img_mask = self.preprocess(images[ix], is_training, rng)
+            result = self.preprocess(images[ix], is_training, rng)
+            if len(result) == 5:
+                # New format: includes tiling
+                crops, image_tokens, patch_idx, img_mask, tiling = result
+                image_tilings.append(tiling)
+            else:
+                # Old format: no tiling (backward compatibility)
+                crops, image_tokens, patch_idx, img_mask = result
+                image_tilings.append(None)
 
             if token_ix == -1:  # -1 is an image inserted at the very start
                 start = 0
@@ -1038,6 +1353,9 @@ class MultiModalPreprocessor:
             "loss_masks": all_loss_masks,
             "target_tokens": target_tokens,
         }
+        # Store tiling information in output (will be moved to metadata by Preprocessor)
+        if len(image_tilings) > 0:
+            out["_tiling"] = image_tilings[0] if len(image_tilings) == 1 else image_tilings
         if image_padding_mask:
             out["image_masks"] = np.concatenate(all_crop_masks, 0)
         if subsegments is not None:
@@ -1122,6 +1440,10 @@ class Preprocessor:
         if "question" in example and "question" not in batch["metadata"]:
             batch["metadata"]["question"] = example["question"]
         
+        # 3) Tiling information (from preprocessing)
+        if "_tiling" in batch:
+            batch["metadata"]["tiling"] = batch.pop("_tiling")
+        
         return batch
 
     @property
@@ -1205,7 +1527,7 @@ class MolmoImageProcessor(BaseImageProcessor):
 
     def __init__(
         self,
-        max_crops: int = 12,
+        max_crops: int = 15,
         overlap_margins: List[int] = (4, 4),
         base_image_input_size: List[int] = (336, 336),
         image_token_length_w: int = 12,
@@ -1263,12 +1585,15 @@ class MolmoImageProcessor(BaseImageProcessor):
         crop_window_size = crop_window_patches * base_image_input_d
         # Use select_tiling (now in same file)
         # Note: MolmoImageProcessor doesn't support tier-based selection, so we pass None
+        # Use original image aspect ratio for matching (margins shouldn't affect aspect ratio)
         tiling = select_tiling(
             original_image_h - total_margin_pixels,
             original_image_w - total_margin_pixels,
             crop_window_size,
             max_crops,  # max_num_crops parameter
-            tier=None  # MolmoImageProcessor uses adaptive selection
+            tier=None,  # MolmoImageProcessor uses adaptive selection
+            original_h=original_image_h,
+            original_w=original_image_w
         )
         # Use resize_and_pad_with_normalize (now in same file)
         src, img_mask = resize_and_pad_with_normalize(
@@ -1413,7 +1738,8 @@ class MolmoImageProcessor(BaseImageProcessor):
 
         joint = np.concatenate(joint, 0)
         img_mask = np.pad(img_mask, [[0, 1], [0, 0]], constant_values=-1)
-        return patches, joint, patch_ordering, img_mask
+        # Return tiling information along with other outputs
+        return patches, joint, patch_ordering, img_mask, tiling
 
     def build_image_input_idx(
         self,
@@ -1492,7 +1818,7 @@ class MolmoImageProcessor(BaseImageProcessor):
         image_token_length_h = image_token_length_h or self.image_token_length_h
         image_patch_size = image_patch_size or self.image_patch_size
 
-        crops, image_tokens, patch_ordering, img_mask = self.image_to_patches_and_tokens(
+        result = self.image_to_patches_and_tokens(
             image,
             image_patch_token_id,
             image_col_token_id,
@@ -1505,6 +1831,13 @@ class MolmoImageProcessor(BaseImageProcessor):
             image_token_length_h,
             image_patch_size,
         )
+        if len(result) == 5:
+            # New format: includes tiling
+            crops, image_tokens, patch_ordering, img_mask, tiling = result
+        else:
+            # Old format: no tiling (backward compatibility)
+            crops, image_tokens, patch_ordering, img_mask = result
+            tiling = None
         patch_idx = self.build_image_input_idx(
             image_tokens,
             patch_ordering,
@@ -1512,7 +1845,7 @@ class MolmoImageProcessor(BaseImageProcessor):
             image_token_length_w=image_token_length_w,
             image_token_length_h=image_token_length_h,
         )
-        return crops, image_tokens, patch_idx, img_mask
+        return crops, image_tokens, patch_idx, img_mask, tiling
 
     def multimodal_preprocess(
         self,
@@ -1565,7 +1898,7 @@ class MolmoImageProcessor(BaseImageProcessor):
 
             for ix in range(n):
                 token_ix = image_idx[ix]
-                crops, image_tokens, patch_idx, img_mask = self.preprocess(
+                result = self.preprocess(
                     images[ix],
                     image_patch_token_id,
                     image_col_token_id,
@@ -1573,6 +1906,13 @@ class MolmoImageProcessor(BaseImageProcessor):
                     image_end_token_id,
                     **kwargs,
                 )
+                if len(result) == 5:
+                    # New format: includes tiling
+                    crops, image_tokens, patch_idx, img_mask, tiling = result
+                else:
+                    # Old format: no tiling (backward compatibility)
+                    crops, image_tokens, patch_idx, img_mask = result
+                    tiling = None
 
                 if token_ix == -1:  # -1 is an image inserted at the very start
                     start = 0

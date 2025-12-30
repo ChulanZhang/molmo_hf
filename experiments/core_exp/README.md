@@ -34,7 +34,7 @@ max_crops = num_crops  # Set to num_crops to ensure exact crop count
 - ✅ **Minimal distortion**: Aspect ratio is preserved as much as possible
 - ✅ **Simple configuration**: Just specify vision token values (e.g., `432 720 1008 1440`)
 - ✅ **Consistent experiments**: All configs use same vision token targets
-- ✅ **Better accuracy**: More vision tokens → better accuracy (when `resize_to_fill=True`)
+- ✅ **Better accuracy**: More vision tokens → better accuracy
 
 **How it works**:
 1. Specify target vision tokens (e.g., 1008)
@@ -137,8 +137,7 @@ torchrun --nproc-per-node=4 experiments/core_exp/acc_lat_profiling.py \
     --num_runs_per_sample 3 \
     --tier_list low medium high \
     --top_k_list 8 12 \
-    --num_active_blocks_list 14 16 \
-    --resize_to_fill
+    --num_active_blocks_list 14 16
 ```
 
 ### Multi-Dataset (Recommended)
@@ -205,14 +204,13 @@ Each configuration is saved in a separate file with descriptive naming:
   "tier_range": {"min_crops": 4, "max_crops": 8},
   "selected_crops_mean": 6.2,
   "selected_crops_distribution": {"4": 10, "6": 25, "8": 15},
-  "selected_vision_tokens_mean": 1008.0,
+  "target_vision_tokens_mean": 1008.0,
   "actual_vision_tokens_mean": 1001.5,
   "max_crops": 8,
   "top_k": 12,
   "num_active_blocks": 16,
   "num_total_blocks": 16,
   "active_block_indices": [0, 1, 2, ..., 15],
-  "resize_to_fill": true,
   "accuracy": 0.85,
   "accuracy_std": 0.02,
   "num_samples": 1000,
@@ -359,12 +357,6 @@ tier_list = ["low", "medium", "high"]
 ```
 
 **See**: `docs/knobs/vision_tokens_knob.md` and `docs/knobs/vision_tokens_knob_tier_implementation_summary.md` for detailed comparison and examples.
-
-### 2. Resize to Fill
-
-**New feature**: `resize_to_fill=True` (default) ensures small images are upscaled to fill the target canvas before tiling, fully utilizing the vision token budget.
-
-**Trade-off**: Upscaling may introduce some artifacts, but ensures full token utilization, which is important for accuracy.
 
 ### 2. Combined Measurement
 

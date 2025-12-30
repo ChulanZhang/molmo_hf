@@ -589,7 +589,7 @@ class ModelConfig(BaseConfig):
     See :data:`TrainConfig.precision` instead.
     """
 
-    max_crops: int = 12
+    max_crops: int = 15
     """
     Max crops to use, exluding the low-res overview crop
     """

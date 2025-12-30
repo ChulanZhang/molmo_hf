@@ -514,7 +514,7 @@ class ModelConfig:
     """
 
     # Image pre-processing options.
-    max_crops: int = 12
+    max_crops: int = 15
 
     crop_mode: str = "patchify-v2-and-resize-c2"
 

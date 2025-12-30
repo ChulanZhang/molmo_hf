@@ -73,8 +73,9 @@ def get_metric_for_dataset(dataset_name: str) -> str:
     
     metric = metric_map.get(dataset_name, "vqa_score")
     
-    # Only log once per dataset to avoid spam
-    if dataset_name not in _logged_datasets:
+    # Only log once per dataset to avoid spam (and only on rank 0 in distributed mode)
+    rank = int(os.environ.get("RANK", 0))
+    if dataset_name not in _logged_datasets and rank == 0:
         log.info(f"Using metric '{metric}' for dataset '{dataset_name}'")
         _logged_datasets.add(dataset_name)
     
@@ -97,15 +98,16 @@ class Timer:
     """Context manager for timing code blocks."""
     def __init__(self, name):
         self.name = name
+        self.logger = logging.getLogger(__name__)
     
     def __enter__(self):
         self.start = time.time()
-        print(f"{Color.CYAN}[DEBUG] Starting: {self.name}...{Color.ENDC}")
+        self.logger.debug(f"Starting: {self.name}...")
         return self
     
     def __exit__(self, *args):
         self.end = time.time()
-        print(f"{Color.CYAN}[DEBUG] Finished: {self.name} in {self.end - self.start:.2f}s{Color.ENDC}")
+        self.logger.debug(f"Finished: {self.name} in {self.end - self.start:.2f}s")
 
 
 
@@ -142,18 +144,25 @@ class BaseExperiment(ABC):
         num_warmup: int = 3,
         hf_cache_dir: Optional[str] = None,
     ):
+        # Check if we're in distributed mode (for logging control)
+        # Only log on rank 0 to reduce clutter in multi-GPU setups
+        self.rank = int(os.environ.get("RANK", 0))
+        
         # Environment Check
         if "MOLMO_DATA_DIR" not in os.environ:
-            log.warning("MOLMO_DATA_DIR is not set. Please ensure you have sourced activate_env.sh")
+            if self.rank == 0:
+                log.warning("MOLMO_DATA_DIR is not set. Please ensure you have sourced activate_env.sh")
         if "HF_HOME" not in os.environ:
-            log.warning("HF_HOME is not set. Please ensure you have sourced activate_env.sh")
+            if self.rank == 0:
+                log.warning("HF_HOME is not set. Please ensure you have sourced activate_env.sh")
         
         # Set umask to allow group write access (664 permissions for files, 775 for directories)
         # This ensures files created by Hugging Face datasets (including lock files)
         # and other Python code can be written by other users in the same group
         # umask 0002: files will be 664 (rw-rw-r--), directories will be 775 (rwxrwxr-x)
         os.umask(0o002)
-        log.debug("Set umask to 0002 (group write enabled)")
+        if self.rank == 0:
+            log.debug("Set umask to 0002 (group write enabled)")
             
         self.model_path = model_path
         
@@ -162,9 +171,11 @@ class BaseExperiment(ABC):
             if torch.cuda.is_available():
                 device_idx = torch.cuda.current_device()
                 self.device = torch.device(f"cuda:{device_idx}")
-                log.info(f"Using GPU device: {self.device} (GPU {device_idx}: {torch.cuda.get_device_name(device_idx)})")
+                if self.rank == 0:
+                    log.info(f"Using GPU device: {self.device} (GPU {device_idx}: {torch.cuda.get_device_name(device_idx)})")
             else:
-                log.warning("Requested CUDA device but no CUDA GPUs available; falling back to CPU.")
+                if self.rank == 0:
+                    log.warning("Requested CUDA device but no CUDA GPUs available; falling back to CPU.")
                 self.device = torch.device("cpu")
         else:
             self.device = torch.device(device)
@@ -182,17 +193,20 @@ class BaseExperiment(ABC):
     
     def _load_model(self, checkpoint_dir: str):
         """Load the Molmo model from a checkpoint directory."""
-        log.info(f"Loading model from {checkpoint_dir}...")
+        if self.rank == 0:
+            log.info(f"Loading model from {checkpoint_dir}...")
         
         # 1. Load Config
         # Strictly from project config
         project_config_path = os.path.join("configs", "model", "config.json")
         
         if os.path.exists(project_config_path):
-            log.info(f"Loading config from {project_config_path}")
+            if self.rank == 0:
+                log.info(f"Loading config from {project_config_path}")
             config = MolmoConfig.from_json_file(project_config_path)
         else:
-            log.warning("No local config found. Fetching from HF Hub...")
+            if self.rank == 0:
+                log.warning("No local config found. Fetching from HF Hub...")
             config = AutoConfig.from_pretrained("allenai/MolmoE-1B-0924", trust_remote_code=True)
             
         # 2. Instantiate Model
@@ -205,7 +219,8 @@ class BaseExperiment(ABC):
              weights_path = os.path.join(checkpoint_dir, "model.safetensors")
              
         if os.path.exists(weights_path):
-            log.info(f"Loading weights from {weights_path}...")
+            if self.rank == 0:
+                log.info(f"Loading weights from {weights_path}...")
             with Timer("Load State Dict"):
                 state_dict = torch.load(weights_path, map_location="cpu", weights_only=True)
                 model.load_state_dict(state_dict, strict=False)
@@ -218,7 +233,8 @@ class BaseExperiment(ABC):
 
     def _load_processor(self, checkpoint_dir: str):
         """Load the Molmo processor (tokenizer + image processor)."""
-        log.info("Loading MolmoProcessor...")
+        if self.rank == 0:
+            log.info("Loading MolmoProcessor...")
         
         # 1. Image Processor
         image_processor = MolmoImageProcessor()
@@ -228,10 +244,12 @@ class BaseExperiment(ABC):
         project_tokenizer_path = os.path.join("configs", "tokenizer")
         
         if os.path.exists(os.path.join(project_tokenizer_path, "tokenizer.json")):
-            log.info(f"Loading tokenizer from {project_tokenizer_path}")
+            if self.rank == 0:
+                log.info(f"Loading tokenizer from {project_tokenizer_path}")
             tokenizer_path = project_tokenizer_path
         else:
-            log.warning("No local tokenizer found. Fetching from HF Hub...")
+            if self.rank == 0:
+                log.warning("No local tokenizer found. Fetching from HF Hub...")
             tokenizer_path = "allenai/MolmoE-1B-0924"
             
         tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
@@ -622,7 +640,36 @@ class BaseExperiment(ABC):
 
         # --- Token Counting ---
         input_ids = batch["input_ids"]
-        results["num_input_text_tokens"] = int(input_ids.shape[1])
+        total_sequence_length = int(input_ids.shape[1])  # Total sequence length (vision + text tokens)
+        
+        # Count vision tokens (if available)
+        # Use image_input_idx to count valid vision tokens
+        actual_vision_tokens = 0
+        if "image_input_idx" in batch and batch["image_input_idx"] is not None:
+            # image_input_idx maps vision features to input_ids positions
+            # Valid entries (>=0) represent actual vision tokens used
+            actual_vision_tokens = int((batch["image_input_idx"] >= 0).sum().item())
+        elif "images" in batch and batch["images"] is not None:
+            # Fallback: estimate from images shape
+            images = batch["images"]
+            if len(images.shape) == 4:  # (B, num_crops, H, W, C) or similar
+                # Assume 576 tokens per crop (24x24 patches)
+                num_crops = images.shape[1]
+                actual_vision_tokens = num_crops * 576
+            elif len(images.shape) == 3:  # (B, num_patches, patch_dim)
+                actual_vision_tokens = int(images.shape[1])
+            else:
+                actual_vision_tokens = 0
+        else:
+            actual_vision_tokens = 0
+        
+        # Calculate text tokens: total - vision
+        actual_text_tokens = total_sequence_length - actual_vision_tokens
+        
+        # Store the three values
+        results["actual_vision_tokens"] = actual_vision_tokens
+        results["actual_text_tokens"] = actual_text_tokens
+        results["total_sequence_length"] = total_sequence_length
         
         # Determine output tokens
         if output is not None:
@@ -639,26 +686,6 @@ class BaseExperiment(ABC):
         # Store output if requested
         if return_output and output is not None:
             results["generated_output"] = output
-        
-        # Count vision tokens (if available)
-        # Use image_input_idx to count valid vision tokens
-        if "image_input_idx" in batch and batch["image_input_idx"] is not None:
-            # image_input_idx maps vision features to input_ids positions
-            # Valid entries (>=0) represent actual vision tokens used
-            results["num_vision_tokens"] = int((batch["image_input_idx"] >= 0).sum().item())
-        elif "images" in batch and batch["images"] is not None:
-            # Fallback: estimate from images shape
-            images = batch["images"]
-            if len(images.shape) == 4:  # (B, num_crops, H, W, C) or similar
-                # Assume 576 tokens per crop (24x24 patches)
-                num_crops = images.shape[1]
-                results["num_vision_tokens"] = num_crops * 576
-            elif len(images.shape) == 3:  # (B, num_patches, patch_dim)
-                results["num_vision_tokens"] = int(images.shape[1])
-            else:
-                results["num_vision_tokens"] = 0
-        else:
-            results["num_vision_tokens"] = 0
         
         return results
     
@@ -1178,7 +1205,12 @@ class BaseExperiment(ABC):
                     "num_samples": len(scores),
                 }
             except Exception as e:
-                log.debug(f"Error in COCO Caption evaluation: {e}, falling back to simplified CIDEr score")
+                # Only log at DEBUG level if it's a known issue (like tempfile), otherwise WARNING
+                error_str = str(e)
+                if "tempfile" in error_str.lower() or "local variable" in error_str.lower():
+                    log.debug(f"Error in COCO Caption evaluation: {e}, falling back to simplified CIDEr score")
+                else:
+                    log.warning(f"Error in COCO Caption evaluation: {e}, falling back to simplified CIDEr score")
                 # Fallback to simplified evaluation
                 from molmo.eval.vqa import cider_score
                 for i, sample_score in enumerate(per_sample_scores):

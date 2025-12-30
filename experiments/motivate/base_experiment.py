@@ -51,15 +51,16 @@ class Timer:
     """Context manager for timing code blocks."""
     def __init__(self, name):
         self.name = name
+        self.logger = logging.getLogger(__name__)
     
     def __enter__(self):
         self.start = time.time()
-        print(f"{Color.CYAN}[DEBUG] Starting: {self.name}...{Color.ENDC}")
+        self.logger.debug(f"Starting: {self.name}...")
         return self
     
     def __exit__(self, *args):
         self.end = time.time()
-        print(f"{Color.CYAN}[DEBUG] Finished: {self.name} in {self.end - self.start:.2f}s{Color.ENDC}")
+        self.logger.debug(f"Finished: {self.name} in {self.end - self.start:.2f}s")
 
 
 
