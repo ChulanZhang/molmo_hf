@@ -90,7 +90,8 @@ def run_combined_profiling(
     num_samples: int,
     num_runs_per_sample: int,
     enable_memory_optimization: bool,
-    log: logging.Logger,
+    importance_scores_file: Optional[str] = None,
+    log: logging.Logger = None,
 ) -> None:
     """Run combined profiling for a single dataset"""
     output_dir = base_output_dir
@@ -138,6 +139,15 @@ def run_combined_profiling(
         "--num_samples", str(num_samples),
         "--num_runs_per_sample", str(num_runs_per_sample),
     ]
+    
+    # Add importance scores file if provided and exists
+    if importance_scores_file and Path(importance_scores_file).exists():
+        cmd.extend(["--importance_scores_file", importance_scores_file])
+        if log:
+            log.debug(f"Using importance scores from: {importance_scores_file}")
+    elif importance_scores_file:
+        if log:
+            log.warning(f"Importance scores file not found: {importance_scores_file}, will use prefix blocks")
     
     if enable_memory_optimization:
         cmd.append("--enable_memory_optimization")
@@ -199,6 +209,9 @@ def main():
     model_path = "checkpoints"
     base_output_dir = "./results/core_exp_a100"
     
+    # Importance scores file (for block selection)
+    importance_scores_file = "./results/profiling/exp3_accuracy_sensitivity/layer_importance_scores.json"
+    
     # Sampling configuration (reduced for A100 memory constraints)
     num_samples = 1000
     sampling_strategy = "balanced"
@@ -250,6 +263,10 @@ def main():
     log.info(f"  {Colors.CYAN}Top K:{Colors.RESET} {top_k_list}")
     log.info(f"  {Colors.CYAN}Active blocks:{Colors.RESET} {num_active_blocks_list}")
     log.info(f"  {Colors.CYAN}Memory optimization:{Colors.RESET} {enable_memory_optimization}")
+    if importance_scores_file and Path(importance_scores_file).exists():
+        log.info(f"  {Colors.CYAN}Importance Scores:{Colors.RESET} {Colors.BRIGHT_WHITE}{importance_scores_file}{Colors.RESET} {Colors.GREEN}✓{Colors.RESET}")
+    elif importance_scores_file:
+        log.warning(f"  {Colors.YELLOW}Importance scores file not found: {importance_scores_file}{Colors.RESET} (will use prefix blocks)")
     log.info("")
     log.info(f"{Colors.CYAN}Note: Using tier-based control allows select_tiling to adaptively select best crop count{Colors.RESET}")
     log.info(f"{Colors.CYAN}      within each tier range based on image aspect ratio. Actual crops and vision tokens{Colors.RESET}")
@@ -277,6 +294,7 @@ def main():
             num_samples=num_samples,
             num_runs_per_sample=num_runs_per_sample,
             enable_memory_optimization=enable_memory_optimization,
+            importance_scores_file=importance_scores_file,
             log=log,
         )
     
