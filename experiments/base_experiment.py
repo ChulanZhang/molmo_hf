@@ -349,13 +349,15 @@ class BaseExperiment(ABC):
         """
         Measure end-to-end inference latency and component latencies.
         
+        Uses hooks to directly measure each stage in a single forward pass, avoiding
+        measurement errors from subtraction methods.
+        
         Args:
             batch: Input batch dictionary.
             max_new_tokens: Number of tokens to generate.
-            measure_components: Whether to measure individual component latencies (Vision, Prefill).
+            measure_components: Whether to measure individual component latencies (Vision, Prefill, Decode).
             num_runs: Number of runs to average over (for stability).
-            use_hook_for_llm_prefill: If True, use forward hooks to directly measure LLM prefill.
-                                     If False (default), use subtraction method (T_prefill_step - T_vision_total).
+            use_hook_for_llm_prefill: Deprecated, always uses hooks now.
             return_output: If True, include the generated output tensor in the results.
             use_eos_token: If True, enable early stopping when EOS token is generated.
                           If False, model will generate exactly max_new_tokens tokens (for profiling experiments).
@@ -375,272 +377,43 @@ class BaseExperiment(ABC):
         
         results = {}
         
-        if measure_components:
-            # --- Measure Vision Components ---
-            if "images" in batch and batch["images"] is not None:
-                vision_backbone = self.model.model.vision_backbone
-                
-                # Warmup (only if averaging)
-                if num_runs > 1:
-                    with torch.inference_mode():
-                        _ = vision_backbone.encode_image(batch["images"])
-                
-                # 1. Measure Vision Encoder (ViT only)
-                latencies_vit = []
-                for _ in range(num_runs):
-                    if self.device.type == 'cuda':
-                        torch.cuda.synchronize(self.device)
-                    start = time.perf_counter()
-                    with torch.inference_mode():
-                        _ = vision_backbone.encode_image(batch["images"])
-                    if self.device.type == 'cuda':
-                        torch.cuda.synchronize(self.device)
-                    latencies_vit.append((time.perf_counter() - start) * 1000)
-                results["T_vision_encoder"] = np.mean(latencies_vit)
-                
-                # 2. Measure Total Vision (ViT + Projector)
-                # We measure the full forward pass of the vision backbone which includes the projector
-                latencies_vision_total = []
-                for _ in range(num_runs):
-                    if self.device.type == 'cuda':
-                        torch.cuda.synchronize(self.device)
-                    start = time.perf_counter()
-                    with torch.inference_mode():
-                        _ = vision_backbone(batch["images"], batch.get("image_masks"))
-                    if self.device.type == 'cuda':
-                        torch.cuda.synchronize(self.device)
-                    latencies_vision_total.append((time.perf_counter() - start) * 1000)
-                results["T_vision_total"] = np.mean(latencies_vision_total)
-                
-                # Calculate Projector Latency
-                results["T_projector"] = max(0.0, results["T_vision_total"] - results["T_vision_encoder"])
-                
-                # For backward compatibility
-                results["T_vision"] = results["T_vision_total"]
-            else:
-                results["T_vision_encoder"] = 0.0
-                results["T_vision_total"] = 0.0
-                results["T_projector"] = 0.0
-                results["T_vision"] = 0.0
-
-            # --- Measure LLM Prefill ---
-            # Direct measurement: Use hooks to measure LLM prefill time directly.
-            # Hook on first transformer block (start) and last transformer block (end).
-            # This avoids the subtraction method which can have measurement errors.
-            
-            if "images" in batch and batch["images"] is not None:
-                transformer = self.model.model.transformer
-                
-                # Use hooks to measure LLM prefill time directly
-                llm_prefill_times = []
-                llm_start_time = None
-                
-                def start_hook(module, input, output):
-                    nonlocal llm_start_time
-                    if self.device.type == 'cuda':
-                        torch.cuda.synchronize(self.device)
-                    llm_start_time = time.perf_counter()
-                
-                def end_hook(module, input, output):
-                    nonlocal llm_start_time
-                    if llm_start_time is not None:
-                        if self.device.type == 'cuda':
-                            torch.cuda.synchronize(self.device)
-                        end_time = time.perf_counter()
-                        llm_prefill_times.append((end_time - llm_start_time) * 1000)
-                        llm_start_time = None
-                
-                # Register hooks on first and last transformer blocks
-                start_hook_handle = None
-                end_hook_handle = None
-                if hasattr(transformer, 'blocks') and len(transformer.blocks) > 0:
-                    start_hook_handle = transformer.blocks[0].register_forward_hook(start_hook)
-                    end_hook_handle = transformer.blocks[-1].register_forward_hook(end_hook)
-                
-                # Warmup
-                if num_runs > 1:
-                    with torch.inference_mode():
-                        with torch.autocast("cuda", enabled=True, dtype=torch.bfloat16):
-                            _ = self.model(
-                                input_ids=batch["input_ids"],
-                                images=batch.get("images"),
-                                image_masks=batch.get("image_masks"),
-                                image_input_idx=batch.get("image_input_idx"),
-                                attention_mask=batch.get("attention_mask"),
-                                attention_bias=batch.get("attention_bias"),
-                                position_ids=batch.get("position_ids"),
-                            )
-                    llm_prefill_times.clear()  # Clear warmup measurement
-                
-                # Measure LLM prefill using hooks
-                for _ in range(num_runs):
-                    if self.device.type == 'cuda':
-                        torch.cuda.synchronize(self.device)
-                    with torch.inference_mode():
-                        with torch.autocast("cuda", enabled=True, dtype=torch.bfloat16):
-                            _ = self.model(
-                                input_ids=batch["input_ids"],
-                                images=batch.get("images"),
-                                image_masks=batch.get("image_masks"),
-                                image_input_idx=batch.get("image_input_idx"),
-                                attention_mask=batch.get("attention_mask"),
-                                attention_bias=batch.get("attention_bias"),
-                                position_ids=batch.get("position_ids"),
-                            )
-                    if self.device.type == 'cuda':
-                        torch.cuda.synchronize(self.device)
-                
-                # Remove hooks
-                if start_hook_handle is not None:
-                    start_hook_handle.remove()
-                if end_hook_handle is not None:
-                    end_hook_handle.remove()
-                
-                if llm_prefill_times:
-                    results["T_LLM_prefill"] = np.mean(llm_prefill_times)
-                else:
-                    # Fallback to subtraction method if hooks failed
-                    log.warning("Hooks did not capture LLM prefill time, falling back to subtraction method")
-                    latencies_prefill_step = []
-                    for _ in range(num_runs):
-                        if self.device.type == 'cuda':
-                            torch.cuda.synchronize(self.device)
-                        start = time.perf_counter()
-                        with torch.inference_mode():
-                            with torch.autocast("cuda", enabled=True, dtype=torch.bfloat16):
-                                _ = self.model(
-                                    input_ids=batch["input_ids"],
-                                    images=batch.get("images"),
-                                    image_masks=batch.get("image_masks"),
-                                    image_input_idx=batch.get("image_input_idx"),
-                                )
-                        if self.device.type == 'cuda':
-                            torch.cuda.synchronize(self.device)
-                        latencies_prefill_step.append((time.perf_counter() - start) * 1000)
-                    
-                    T_prefill_step = np.mean(latencies_prefill_step)
-                    results["T_LLM_prefill"] = max(0.0, T_prefill_step - results.get("T_vision_total", 0.0))
-            else:
-                # No images, measure LLM prefill directly
-                transformer = self.model.model.transformer
-                
-                # Warmup
-                if num_runs > 1:
-                    with torch.inference_mode():
-                        with torch.autocast("cuda", enabled=True, dtype=torch.bfloat16):
-                            _ = transformer(
-                                input_ids=batch["input_ids"],
-                                attention_mask=batch.get("attention_mask"),
-                                attention_bias=batch.get("attention_bias"),
-                                position_ids=batch.get("position_ids"),
-                            )
-                
-                latencies_llm_prefill = []
-                for _ in range(num_runs):
-                    if self.device.type == 'cuda':
-                        torch.cuda.synchronize(self.device)
-                    start = time.perf_counter()
-                    with torch.inference_mode():
-                        with torch.autocast("cuda", enabled=True, dtype=torch.bfloat16):
-                            _ = transformer(
-                                input_ids=batch["input_ids"],
-                                attention_mask=batch.get("attention_mask"),
-                                attention_bias=batch.get("attention_bias"),
-                                position_ids=batch.get("position_ids"),
-                            )
-                    if self.device.type == 'cuda':
-                        torch.cuda.synchronize(self.device)
-                    latencies_llm_prefill.append((time.perf_counter() - start) * 1000)
-                
-                results["T_LLM_prefill"] = np.mean(latencies_llm_prefill)
+        # Initialize component latencies
+        results["T_vision_total"] = 0.0
+        results["T_vision"] = 0.0
+        results["T_LLM_prefill"] = 0.0
+        results["T_LLM_decode"] = 0.0
+        results["T_total"] = 0.0
         
-        # --- Measure Total Generation Latency (Decode) ---
-        # Only if max_new_tokens > 0
         if max_new_tokens > 0:
-            if self.device.type == 'cuda':
-                torch.cuda.synchronize(self.device)
-            start = time.perf_counter()
-            
-            with torch.inference_mode():
-                with torch.autocast("cuda", enabled=True, dtype=torch.bfloat16):
-                    if self.device.type == 'cuda':
-                        torch.cuda.empty_cache()
-                    
-                    from transformers import GenerationConfig
-                    
-                    # Get EOS and PAD token IDs for early stopping
-                    # This allows the model to stop early when generating EOS token
-                    eos_token_id = None
-                    pad_token_id = None
-                    
-                    if use_eos_token:
-                        eos_token_id = self.tokenizer.eos_token_id
-                        if eos_token_id is None:
-                            eos_token_id = getattr(self.model.config, 'eos_token_id', None)
-                        
-                        pad_token_id = self.tokenizer.pad_token_id
-                        if pad_token_id is None:
-                            pad_token_id = getattr(self.model.config, 'pad_token_id', None)
-                    
-                    # Build generation config
-                    generation_config_kwargs = {
-                        "max_new_tokens": max_new_tokens,
-                        "use_cache": True,
-                    }
-                    if use_eos_token and eos_token_id is not None:
-                        generation_config_kwargs["eos_token_id"] = eos_token_id
-                    if pad_token_id is not None:
-                        generation_config_kwargs["pad_token_id"] = pad_token_id
-                    
-                    generation_config = GenerationConfig(**generation_config_kwargs)
-                    
-                    output = self.model.generate(
-                        input_ids=batch["input_ids"],
-                        images=batch.get("images"),
-                        image_masks=batch.get("image_masks"),
-                        image_input_idx=batch.get("image_input_idx"),
-                        generation_config=generation_config,
-                    )
-            
-            if self.device.type == 'cuda':
-                torch.cuda.synchronize(self.device)
-            results["T_total"] = (time.perf_counter() - start) * 1000
-            
-            # Calculate Decode Latency
-            # T_total includes Vision + Prefill + Decode
+            # --- Measure all components in a single generate() call using hooks ---
             if measure_components:
-                results["T_LLM_decode"] = max(0.0, results["T_total"] - results.get("T_vision_total", 0.0) - results.get("T_LLM_prefill", 0.0))
-        else:
-            # If no generation, we still need to measure T_total (prefill step)
-            # If measure_components=False, we need to measure it directly
-            if not measure_components:
-                # Measure total prefill latency directly (Vision + LLM Prefill in one pass)
-                latencies_total = []
-                for _ in range(num_runs):
-                    if self.device.type == 'cuda':
-                        torch.cuda.synchronize(self.device)
-                    start = time.perf_counter()
-                    with torch.inference_mode():
-                        with torch.autocast("cuda", enabled=True, dtype=torch.bfloat16):
-                            _ = self.model(
-                                input_ids=batch["input_ids"],
-                                images=batch.get("images"),
-                                image_masks=batch.get("image_masks"),
-                                image_input_idx=batch.get("image_input_idx"),
-                            )
-                    if self.device.type == 'cuda':
-                        torch.cuda.synchronize(self.device)
-                    latencies_total.append((time.perf_counter() - start) * 1000)
-                results["T_total"] = np.mean(latencies_total)
+                # Use hooks to measure Vision, Prefill, and Decode in one pass
+                output = self._measure_with_hooks(
+                    batch, max_new_tokens, num_runs, use_eos_token, results
+                )
             else:
-                # If measure_components=True, T_total is just the prefill step (Vision + LLM Prefill)
-                results["T_total"] = results.get("T_vision_total", 0.0) + results.get("T_LLM_prefill", 0.0)
-            results["T_LLM_decode"] = 0.0
-            output = None # No generation output
+                # Just measure total time without component breakdown
+                output = self._measure_total_only(
+                    batch, max_new_tokens, num_runs, use_eos_token, results
+                )
+        else:
+            # No generation, only measure prefill
+            if measure_components:
+                output = self._measure_prefill_with_hooks(
+                    batch, num_runs, results
+                )
+            else:
+                output = self._measure_prefill_total_only(
+                    batch, num_runs, results
+                )
 
         # --- Token Counting ---
         input_ids = batch["input_ids"]
         total_sequence_length = int(input_ids.shape[1])  # Total sequence length (vision + text tokens)
+        
+        # Store output if requested
+        if return_output and output is not None:
+            results["generated_output"] = output
         
         # Count vision tokens (if available)
         # Use image_input_idx to count valid vision tokens
@@ -688,6 +461,426 @@ class BaseExperiment(ABC):
             results["generated_output"] = output
         
         return results
+    
+    def _measure_with_hooks(
+        self,
+        batch: Dict[str, torch.Tensor],
+        max_new_tokens: int,
+        num_runs: int,
+        use_eos_token: bool,
+        results: Dict[str, float],
+    ) -> Optional[torch.Tensor]:
+        """
+        Measure Vision, Prefill, and Decode using hooks in a single generate() call.
+        
+        This method registers hooks on vision_backbone and transformer blocks to directly
+        measure each stage, avoiding measurement errors from subtraction methods.
+        """
+        from transformers import GenerationConfig
+        
+        # Prepare generation config
+        eos_token_id = None
+        pad_token_id = None
+        if use_eos_token:
+            eos_token_id = self.tokenizer.eos_token_id
+            if eos_token_id is None:
+                eos_token_id = getattr(self.model.config, 'eos_token_id', None)
+            pad_token_id = self.tokenizer.pad_token_id
+            if pad_token_id is None:
+                pad_token_id = getattr(self.model.config, 'pad_token_id', None)
+        
+        generation_config_kwargs = {
+            "max_new_tokens": max_new_tokens,
+            "use_cache": True,
+        }
+        if use_eos_token and eos_token_id is not None:
+            generation_config_kwargs["eos_token_id"] = eos_token_id
+        if pad_token_id is not None:
+            generation_config_kwargs["pad_token_id"] = pad_token_id
+        generation_config = GenerationConfig(**generation_config_kwargs)
+        
+        # Initialize measurement containers
+        vision_times = []
+        prefill_times = []
+        total_times = []
+        decode_times = []  # Store total decode time per run
+        
+        # Hook state
+        vision_start_time = None
+        prefill_start_time = None
+        forward_count = 0  # Track prefill (0) vs decode (>0)
+        decode_start_time = None  # Start time of decode phase (first decode step)
+        
+        # Vision hook (only for prefill step)
+        vision_hook_handle = None
+        if "images" in batch and batch["images"] is not None:
+            vision_backbone = self.model.model.vision_backbone
+            
+            def vision_hook(module, input, output):
+                nonlocal vision_start_time
+                if forward_count == 0:  # Only measure in prefill step
+                    if self.device.type == 'cuda':
+                        torch.cuda.synchronize(self.device)
+                    vision_start_time = time.perf_counter()
+            
+            vision_hook_handle = vision_backbone.register_forward_hook(vision_hook)
+        
+        # Transformer hooks (for prefill)
+        transformer = self.model.model.transformer
+        prefill_start_hook_handle = None
+        prefill_end_hook_handle = None
+        
+        if hasattr(transformer, 'blocks') and len(transformer.blocks) > 0:
+            # Prefill hooks (first and last block)
+            def prefill_start_hook(module, input, output):
+                nonlocal prefill_start_time, forward_count
+                if forward_count == 0:  # Only in prefill step
+                    if self.device.type == 'cuda':
+                        torch.cuda.synchronize(self.device)
+                    prefill_start_time = time.perf_counter()
+            
+            def prefill_end_hook(module, input, output):
+                nonlocal prefill_start_time, forward_count
+                if forward_count == 0 and prefill_start_time is not None:
+                    if self.device.type == 'cuda':
+                        torch.cuda.synchronize(self.device)
+                    end_time = time.perf_counter()
+                    prefill_times.append((end_time - prefill_start_time) * 1000)
+                    prefill_start_time = None
+            
+            prefill_start_hook_handle = transformer.blocks[0].register_forward_hook(prefill_start_hook)
+            prefill_end_hook_handle = transformer.blocks[-1].register_forward_hook(prefill_end_hook)
+            # Note: Decode is measured in tracked_forward, not via hooks
+        
+        # Custom forward wrapper to track forward count and measure decode
+        original_forward = self.model.model.forward
+        
+        def tracked_forward(*args, **kwargs):
+            nonlocal forward_count, vision_start_time, decode_start_time
+            is_prefill = forward_count == 0
+            
+            # Measure vision end time (if in prefill)
+            if is_prefill and vision_start_time is not None:
+                if self.device.type == 'cuda':
+                    torch.cuda.synchronize(self.device)
+                vision_end_time = time.perf_counter()
+                vision_times.append((vision_end_time - vision_start_time) * 1000)
+                vision_start_time = None
+            
+            # Record decode start time (only on first decode step)
+            if not is_prefill and decode_start_time is None:
+                if self.device.type == 'cuda':
+                    torch.cuda.synchronize(self.device)
+                decode_start_time = time.perf_counter()
+            
+            # Call original forward
+            output = original_forward(*args, **kwargs)
+            
+            # Increment forward count after prefill
+            if is_prefill:
+                forward_count += 1
+            
+            return output
+        
+        # Warmup
+        if num_runs > 1:
+            self.model.model.forward = tracked_forward
+            with torch.inference_mode():
+                with torch.autocast("cuda", enabled=True, dtype=torch.bfloat16):
+                    _ = self.model.generate(
+                        input_ids=batch["input_ids"],
+                        images=batch.get("images"),
+                        image_masks=batch.get("image_masks"),
+                        image_input_idx=batch.get("image_input_idx"),
+                        generation_config=generation_config,
+                    )
+            # Clear warmup measurements
+            vision_times.clear()
+            prefill_times.clear()
+            decode_times.clear()
+            total_times.clear()
+            forward_count = 0
+            decode_start_time = None
+        
+        # Actual measurements
+        for run_idx in range(num_runs):
+            forward_count = 0
+            vision_start_time = None
+            prefill_start_time = None
+            decode_start_time = None
+            
+            self.model.model.forward = tracked_forward
+            
+            if self.device.type == 'cuda':
+                torch.cuda.synchronize(self.device)
+            total_start = time.perf_counter()
+            
+            with torch.inference_mode():
+                with torch.autocast("cuda", enabled=True, dtype=torch.bfloat16):
+                    output = self.model.generate(
+                        input_ids=batch["input_ids"],
+                        images=batch.get("images"),
+                        image_masks=batch.get("image_masks"),
+                        image_input_idx=batch.get("image_input_idx"),
+                        generation_config=generation_config,
+                    )
+            
+            if self.device.type == 'cuda':
+                torch.cuda.synchronize(self.device)
+            total_end = time.perf_counter()
+            total_times.append((total_end - total_start) * 1000)
+            
+            # Measure decode end time (after all decode steps complete)
+            if decode_start_time is not None:
+                if self.device.type == 'cuda':
+                    torch.cuda.synchronize(self.device)
+                decode_end_time = time.perf_counter()
+                decode_times.append((decode_end_time - decode_start_time) * 1000)
+        
+        # Restore original forward
+        self.model.model.forward = original_forward
+        
+        # Remove hooks
+        if vision_hook_handle is not None:
+            vision_hook_handle.remove()
+        if prefill_start_hook_handle is not None:
+            prefill_start_hook_handle.remove()
+        if prefill_end_hook_handle is not None:
+            prefill_end_hook_handle.remove()
+        
+        # Compute averages
+        if vision_times:
+            results["T_vision_total"] = np.mean(vision_times)
+            results["T_vision"] = results["T_vision_total"]
+        if prefill_times:
+            results["T_LLM_prefill"] = np.mean(prefill_times)
+        # Decode time is total time from first to last decode step
+        if decode_times:
+            results["T_LLM_decode"] = np.mean(decode_times)
+        if total_times:
+            results["T_total"] = np.mean(total_times)
+        
+        return output if num_runs > 0 else None
+    
+    def _measure_total_only(
+        self,
+        batch: Dict[str, torch.Tensor],
+        max_new_tokens: int,
+        num_runs: int,
+        use_eos_token: bool,
+        results: Dict[str, float],
+    ) -> Optional[torch.Tensor]:
+        """Measure only total generation time without component breakdown."""
+        from transformers import GenerationConfig
+        
+        eos_token_id = None
+        pad_token_id = None
+        if use_eos_token:
+            eos_token_id = self.tokenizer.eos_token_id
+            if eos_token_id is None:
+                eos_token_id = getattr(self.model.config, 'eos_token_id', None)
+            pad_token_id = self.tokenizer.pad_token_id
+            if pad_token_id is None:
+                pad_token_id = getattr(self.model.config, 'pad_token_id', None)
+        
+        generation_config_kwargs = {
+            "max_new_tokens": max_new_tokens,
+            "use_cache": True,
+        }
+        if use_eos_token and eos_token_id is not None:
+            generation_config_kwargs["eos_token_id"] = eos_token_id
+        if pad_token_id is not None:
+            generation_config_kwargs["pad_token_id"] = pad_token_id
+        generation_config = GenerationConfig(**generation_config_kwargs)
+        
+        latencies = []
+        for _ in range(num_runs):
+            if self.device.type == 'cuda':
+                torch.cuda.synchronize(self.device)
+            start = time.perf_counter()
+            
+            with torch.inference_mode():
+                with torch.autocast("cuda", enabled=True, dtype=torch.bfloat16):
+                    output = self.model.generate(
+                        input_ids=batch["input_ids"],
+                        images=batch.get("images"),
+                        image_masks=batch.get("image_masks"),
+                        image_input_idx=batch.get("image_input_idx"),
+                        generation_config=generation_config,
+                    )
+            
+            if self.device.type == 'cuda':
+                torch.cuda.synchronize(self.device)
+            latencies.append((time.perf_counter() - start) * 1000)
+        
+        results["T_total"] = np.mean(latencies)
+        return output if num_runs > 0 else None
+    
+    def _measure_prefill_with_hooks(
+        self,
+        batch: Dict[str, torch.Tensor],
+        num_runs: int,
+        results: Dict[str, float],
+    ) -> Optional[torch.Tensor]:
+        """Measure Vision and Prefill using hooks in a single forward pass."""
+        vision_times = []
+        prefill_times = []
+        total_times = []
+        
+        vision_start_time = None
+        prefill_start_time = None
+        
+        # Vision hook
+        vision_hook_handle = None
+        if "images" in batch and batch["images"] is not None:
+            vision_backbone = self.model.model.vision_backbone
+            
+            def vision_hook(module, input, output):
+                nonlocal vision_start_time
+                if self.device.type == 'cuda':
+                    torch.cuda.synchronize(self.device)
+                vision_start_time = time.perf_counter()
+            
+            vision_hook_handle = vision_backbone.register_forward_hook(vision_hook)
+        
+        # Transformer hooks
+        transformer = self.model.model.transformer
+        prefill_start_hook_handle = None
+        prefill_end_hook_handle = None
+        
+        if hasattr(transformer, 'blocks') and len(transformer.blocks) > 0:
+            def prefill_start_hook(module, input, output):
+                nonlocal prefill_start_time
+                if self.device.type == 'cuda':
+                    torch.cuda.synchronize(self.device)
+                prefill_start_time = time.perf_counter()
+            
+            def prefill_end_hook(module, input, output):
+                nonlocal prefill_start_time
+                if prefill_start_time is not None:
+                    if self.device.type == 'cuda':
+                        torch.cuda.synchronize(self.device)
+                    end_time = time.perf_counter()
+                    prefill_times.append((end_time - prefill_start_time) * 1000)
+                    prefill_start_time = None
+            
+            prefill_start_hook_handle = transformer.blocks[0].register_forward_hook(prefill_start_hook)
+            prefill_end_hook_handle = transformer.blocks[-1].register_forward_hook(prefill_end_hook)
+        
+        # Custom forward wrapper to measure vision end
+        original_forward = self.model.model.forward
+        
+        def tracked_forward(*args, **kwargs):
+            nonlocal vision_start_time
+            output = original_forward(*args, **kwargs)
+            if vision_start_time is not None:
+                if self.device.type == 'cuda':
+                    torch.cuda.synchronize(self.device)
+                vision_end_time = time.perf_counter()
+                vision_times.append((vision_end_time - vision_start_time) * 1000)
+                vision_start_time = None
+            return output
+        
+        # Warmup
+        if num_runs > 1:
+            self.model.model.forward = tracked_forward
+            with torch.inference_mode():
+                with torch.autocast("cuda", enabled=True, dtype=torch.bfloat16):
+                    _ = self.model(
+                        input_ids=batch["input_ids"],
+                        images=batch.get("images"),
+                        image_masks=batch.get("image_masks"),
+                        image_input_idx=batch.get("image_input_idx"),
+                        attention_mask=batch.get("attention_mask"),
+                        attention_bias=batch.get("attention_bias"),
+                        position_ids=batch.get("position_ids"),
+                    )
+            vision_times.clear()
+            prefill_times.clear()
+            total_times.clear()
+        
+        # Actual measurements
+        for _ in range(num_runs):
+            vision_start_time = None
+            prefill_start_time = None
+            
+            self.model.model.forward = tracked_forward
+            
+            if self.device.type == 'cuda':
+                torch.cuda.synchronize(self.device)
+            total_start = time.perf_counter()
+            
+            with torch.inference_mode():
+                with torch.autocast("cuda", enabled=True, dtype=torch.bfloat16):
+                    output = self.model(
+                        input_ids=batch["input_ids"],
+                        images=batch.get("images"),
+                        image_masks=batch.get("image_masks"),
+                        image_input_idx=batch.get("image_input_idx"),
+                        attention_mask=batch.get("attention_mask"),
+                        attention_bias=batch.get("attention_bias"),
+                        position_ids=batch.get("position_ids"),
+                    )
+            
+            if self.device.type == 'cuda':
+                torch.cuda.synchronize(self.device)
+            total_times.append((time.perf_counter() - total_start) * 1000)
+        
+        # Restore original forward
+        self.model.model.forward = original_forward
+        
+        # Remove hooks
+        if vision_hook_handle is not None:
+            vision_hook_handle.remove()
+        if prefill_start_hook_handle is not None:
+            prefill_start_hook_handle.remove()
+        if prefill_end_hook_handle is not None:
+            prefill_end_hook_handle.remove()
+        
+        # Compute averages
+        if vision_times:
+            results["T_vision_total"] = np.mean(vision_times)
+            results["T_vision"] = results["T_vision_total"]
+        if prefill_times:
+            results["T_LLM_prefill"] = np.mean(prefill_times)
+        if total_times:
+            results["T_total"] = np.mean(total_times)
+        else:
+            results["T_total"] = results.get("T_vision_total", 0.0) + results.get("T_LLM_prefill", 0.0)
+        
+        return output if num_runs > 0 else None
+    
+    def _measure_prefill_total_only(
+        self,
+        batch: Dict[str, torch.Tensor],
+        num_runs: int,
+        results: Dict[str, float],
+    ) -> Optional[torch.Tensor]:
+        """Measure only total prefill time without component breakdown."""
+        latencies = []
+        for _ in range(num_runs):
+            if self.device.type == 'cuda':
+                torch.cuda.synchronize(self.device)
+            start = time.perf_counter()
+            
+            with torch.inference_mode():
+                with torch.autocast("cuda", enabled=True, dtype=torch.bfloat16):
+                    output = self.model(
+                        input_ids=batch["input_ids"],
+                        images=batch.get("images"),
+                        image_masks=batch.get("image_masks"),
+                        image_input_idx=batch.get("image_input_idx"),
+                        attention_mask=batch.get("attention_mask"),
+                        attention_bias=batch.get("attention_bias"),
+                        position_ids=batch.get("position_ids"),
+                    )
+            
+            if self.device.type == 'cuda':
+                torch.cuda.synchronize(self.device)
+            latencies.append((time.perf_counter() - start) * 1000)
+        
+        results["T_total"] = np.mean(latencies)
+        return output if num_runs > 0 else None
     
     def count_flops(
         self,

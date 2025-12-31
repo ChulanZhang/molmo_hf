@@ -79,8 +79,7 @@ Supports dataset sampling to reduce experiment time:
 ### 4. Stage-Wise Latency Breakdown
 
 Records detailed stage breakdown:
-- `T_vision_encoder`: ViT processing time
-- `T_projector`: Image feature projection time
+- `T_vision_total`: Vision backbone processing time (ViT + Projector)
 - `T_LLM_prefill`: Transformer prefill time
 - `T_LLM_decode`: Per-token generation time
 - `T_total`: End-to-end latency
@@ -119,7 +118,7 @@ Records:
 - **Configuration**: vision_tokens (primary), top_k, num_active_blocks
 - **Language prompt**: Full prompt text (per sample)
 - **Accuracy**: Per-sample accuracy scores
-- **Stage latencies**: Per-sample stage breakdown (T_vision_encoder, T_projector, T_LLM_prefill, T_LLM_decode, T_total)
+- **Stage latencies**: Per-sample stage breakdown (T_vision_total, T_LLM_prefill, T_LLM_decode, T_total)
 - **Aggregate statistics**: Mean, std, P50, P95, P99 for all metrics
 
 ## Usage
@@ -219,8 +218,7 @@ Each configuration is saved in a separate file with descriptive naming:
   "theoretical_image_size": [784, 560],
   "theoretical_vision_tokens": 1008,
   "aggregate_stats": {
-    "T_vision_encoder_mean": 45.2,
-    "T_projector_mean": 2.1,
+    "T_vision_total_mean": 47.3,
     "T_LLM_prefill_mean": 120.5,
     "T_LLM_decode_mean": 15.3,
     "T_total_mean": 183.1,
@@ -256,8 +254,7 @@ Each configuration is saved in a separate file with descriptive naming:
         "image_id": "12345",
         ...
       },
-      "T_vision_encoder": 45.1,
-      "T_projector": 2.0,
+      "T_vision_total": 47.1,
       "T_vision_total": 47.1,
       "T_LLM_prefill": 120.3,
       "T_LLM_decode": 15.2,
@@ -309,7 +306,7 @@ See `docs/core_exp/PROFILER_NOTES.md` for details.
 ### E1: Stage-Aware Latency Decomposition
 
 Uses configuration result files (e.g., `coco-2014-vqa_imgsizetokens1008_topk8_blocks14.json`):
-- **Stage breakdown**: `T_vision_encoder`, `T_projector`, `T_LLM_prefill`, `T_LLM_decode` (per sample in `per_sample_results`)
+- **Stage breakdown**: `T_vision_total`, `T_LLM_prefill`, `T_LLM_decode` (per sample in `per_sample_results`)
 - **Vision tokens**: `actual_vision_tokens` per sample
 - **Scaling curves**: Prefill vs input tokens, Decode vs output tokens
 - **Profiler results**: If `--use_profiler` enabled, use `profiler_results_config_*.txt` for operator-level breakdown
@@ -329,7 +326,7 @@ Uses configuration result files:
 Uses configuration result files:
 - **Training data**: Stage latencies for different configurations (from `per_sample_results`)
 - **Features**: `target_vision_tokens`, `top_k`, `num_active_blocks`, `input_text_tokens`, `output_tokens`
-- **Targets**: Stage latencies (`T_vision_encoder`, `T_projector`, `T_LLM_prefill`, `T_LLM_decode`)
+- **Targets**: Stage latencies (`T_vision_total`, `T_LLM_prefill`, `T_LLM_decode`)
 - **Per-sample data**: Use `per_sample_results` for training (rich per-sample data)
 
 ## Key Changes from Previous Experiments

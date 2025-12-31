@@ -48,7 +48,7 @@ def merge_config_results(gathered_configs: List[Dict], template_config: Dict) ->
         merged_config["num_samples"] = len(all_per_sample)
     
     # Recompute aggregate stats
-    stage_keys = ["T_vision_encoder", "T_projector", "T_vision_total", 
+    stage_keys = ["T_vision_total", 
                  "T_LLM_prefill", "T_LLM_decode", "T_total", "T_decode_per_token"]
     aggregate_stats = {}
     for key in stage_keys:

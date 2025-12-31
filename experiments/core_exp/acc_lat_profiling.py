@@ -367,8 +367,7 @@ def _merge_config_results(gathered_configs: List[Dict], template_config: Dict) -
         merged_config["num_samples"] = len(all_per_sample)
     
     # Recompute aggregate stats
-    stage_keys = ["T_vision_encoder", "T_projector", "T_vision_total", 
-                 "T_LLM_prefill", "T_LLM_decode", "T_total", "T_decode_per_token"]
+    stage_keys = ["T_vision_total", "T_LLM_prefill", "T_LLM_decode", "T_total", "T_decode_per_token"]
     aggregate_stats = {}
     for key in stage_keys:
         values = [s[key] for s in all_per_sample if key in s]
@@ -1190,8 +1189,6 @@ class CombinedProfilingExperiment(BaseExperiment):
                                 "pred": pred_score.get("pred", ""),  # Prediction text
                                 "metadata": pred_score.get("metadata", {}),  # Sample metadata (contains question, answers, image_id, etc.)
                                 # Stage latencies (ms)
-                                "T_vision_encoder": latency_results.get("T_vision_encoder", 0.0),
-                                "T_projector": latency_results.get("T_projector", 0.0),
                                 "T_vision_total": latency_results.get("T_vision_total", 0.0),
                                 "T_LLM_prefill": latency_results.get("T_LLM_prefill", 0.0),
                                 "T_LLM_decode": latency_results.get("T_LLM_decode", 0.0),
@@ -1260,8 +1257,7 @@ class CombinedProfilingExperiment(BaseExperiment):
                         accuracy_std = 0.0
                     
                     # Latency statistics
-                    stage_keys = ["T_vision_encoder", "T_projector", "T_vision_total", 
-                                 "T_LLM_prefill", "T_LLM_decode", "T_total", "T_decode_per_token"]
+                    stage_keys = ["T_vision_total", "T_LLM_prefill", "T_LLM_decode", "T_total", "T_decode_per_token"]
                     
                     aggregate_stats = {}
                     for key in stage_keys:
