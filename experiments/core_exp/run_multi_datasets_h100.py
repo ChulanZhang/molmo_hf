@@ -88,7 +88,8 @@ def run_combined_profiling(
     sampling_strategy: str,
     num_samples: int,
     num_runs_per_sample: int,
-    log: logging.Logger,
+    importance_scores_file: Optional[str] = None,
+    log: logging.Logger = None,
 ) -> bool:
     """Run combined profiling for a single dataset
     
@@ -122,6 +123,15 @@ def run_combined_profiling(
         "--num_samples", str(num_samples),
         "--num_runs_per_sample", str(num_runs_per_sample),
     ]
+    
+    # Add importance scores file if provided and exists
+    if importance_scores_file and Path(importance_scores_file).exists():
+        cmd.extend(["--importance_scores_file", importance_scores_file])
+        if log:
+            log.debug(f"Using importance scores from: {importance_scores_file}")
+    elif importance_scores_file:
+        if log:
+            log.warning(f"Importance scores file not found: {importance_scores_file}, will use prefix blocks")
     
     # Create log file
     log_file = log_dir / f"combined_profiling_{dataset_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
@@ -194,6 +204,9 @@ def main():
     model_path = "checkpoints"
     base_output_dir = "./results/core_exp_h100"
     
+    # Importance scores file (for block selection)
+    importance_scores_file = "./results/profiling/exp3_accuracy_sensitivity/layer_importance_scores.json"
+    
     # Sampling configuration
     num_samples = 2000
     sampling_strategy = "balanced"
@@ -236,6 +249,10 @@ def main():
              f"{Colors.CYAN}Blocks:{Colors.RESET} {num_active_blocks_list} | "
              f"{Colors.CYAN}GPUs:{Colors.RESET} {num_gpus}")
     log.info(f"{Colors.BRIGHT_YELLOW}Output:{Colors.RESET} {Colors.BRIGHT_WHITE}{base_output_dir}{Colors.RESET}")
+    if importance_scores_file and Path(importance_scores_file).exists():
+        log.info(f"{Colors.BRIGHT_YELLOW}Importance Scores:{Colors.RESET} {Colors.BRIGHT_WHITE}{importance_scores_file}{Colors.RESET} {Colors.GREEN}✓{Colors.RESET}")
+    elif importance_scores_file:
+        log.warning(f"{Colors.YELLOW}Importance scores file not found: {importance_scores_file}{Colors.RESET} (will use prefix blocks)")
     log.info(f"{Colors.BRIGHT_CYAN}{'='*60}{Colors.RESET}")
     
     # Run experiments
@@ -257,6 +274,7 @@ def main():
             sampling_strategy=sampling_strategy,
             num_samples=num_samples,
             num_runs_per_sample=num_runs_per_sample,
+            importance_scores_file=importance_scores_file,
             log=log,
         )
         

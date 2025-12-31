@@ -518,10 +518,14 @@ class BaseExperiment(ABC):
             
             def vision_hook(module, input, output):
                 nonlocal vision_start_time
-                if forward_count == 0:  # Only measure in prefill step
+                # This hook is called AFTER vision forward completes
+                # Record end time and compute duration
+                if vision_start_time is not None:
                     if self.device.type == 'cuda':
                         torch.cuda.synchronize(self.device)
-                    vision_start_time = time.perf_counter()
+                    vision_end_time = time.perf_counter()
+                    vision_times.append((vision_end_time - vision_start_time) * 1000)
+                    vision_start_time = None  # Reset for next run
             
             vision_hook_handle = vision_backbone.register_forward_hook(vision_hook)
         
@@ -559,13 +563,11 @@ class BaseExperiment(ABC):
             nonlocal forward_count, vision_start_time, decode_start_time
             is_prefill = forward_count == 0
             
-            # Measure vision end time (if in prefill)
-            if is_prefill and vision_start_time is not None:
+            # Record vision start time (before forward, only in prefill step)
+            if is_prefill and vision_start_time is None and "images" in batch and batch["images"] is not None:
                 if self.device.type == 'cuda':
                     torch.cuda.synchronize(self.device)
-                vision_end_time = time.perf_counter()
-                vision_times.append((vision_end_time - vision_start_time) * 1000)
-                vision_start_time = None
+                vision_start_time = time.perf_counter()
             
             # Record decode start time (only on first decode step)
             if not is_prefill and decode_start_time is None:
@@ -730,16 +732,21 @@ class BaseExperiment(ABC):
         vision_start_time = None
         prefill_start_time = None
         
-        # Vision hook
+        # Vision hook (records end time when vision forward completes)
         vision_hook_handle = None
         if "images" in batch and batch["images"] is not None:
             vision_backbone = self.model.model.vision_backbone
             
             def vision_hook(module, input, output):
                 nonlocal vision_start_time
-                if self.device.type == 'cuda':
-                    torch.cuda.synchronize(self.device)
-                vision_start_time = time.perf_counter()
+                # This hook is called AFTER vision forward completes
+                # Record end time and compute duration
+                if vision_start_time is not None:
+                    if self.device.type == 'cuda':
+                        torch.cuda.synchronize(self.device)
+                    vision_end_time = time.perf_counter()
+                    vision_times.append((vision_end_time - vision_start_time) * 1000)
+                    vision_start_time = None  # Reset for next run
             
             vision_hook_handle = vision_backbone.register_forward_hook(vision_hook)
         
@@ -767,18 +774,17 @@ class BaseExperiment(ABC):
             prefill_start_hook_handle = transformer.blocks[0].register_forward_hook(prefill_start_hook)
             prefill_end_hook_handle = transformer.blocks[-1].register_forward_hook(prefill_end_hook)
         
-        # Custom forward wrapper to measure vision end
+        # Custom forward wrapper to measure vision start
         original_forward = self.model.model.forward
         
         def tracked_forward(*args, **kwargs):
             nonlocal vision_start_time
-            output = original_forward(*args, **kwargs)
-            if vision_start_time is not None:
+            # Record vision start time (before forward, only if not already set)
+            if vision_start_time is None and "images" in batch and batch["images"] is not None:
                 if self.device.type == 'cuda':
                     torch.cuda.synchronize(self.device)
-                vision_end_time = time.perf_counter()
-                vision_times.append((vision_end_time - vision_start_time) * 1000)
-                vision_start_time = None
+                vision_start_time = time.perf_counter()
+            output = original_forward(*args, **kwargs)
             return output
         
         # Warmup

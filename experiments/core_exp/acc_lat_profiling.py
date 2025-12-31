@@ -366,50 +366,47 @@ def _merge_config_results(gathered_configs: List[Dict], template_config: Dict) -
         merged_config["accuracy_std"] = float(np.std(accuracy_values))
         merged_config["num_samples"] = len(all_per_sample)
     
-    # Recompute aggregate stats
+    # Recompute latency stats
     stage_keys = ["T_vision_total", "T_LLM_prefill", "T_LLM_decode", "T_total", "T_decode_per_token"]
-    aggregate_stats = {}
+    latency_stats = {}
     for key in stage_keys:
         values = [s[key] for s in all_per_sample if key in s]
         if values:
-            aggregate_stats[f"{key}_mean"] = float(np.mean(values))
-            aggregate_stats[f"{key}_std"] = float(np.std(values))
-            aggregate_stats[f"{key}_p50"] = float(np.percentile(values, 50))
-            aggregate_stats[f"{key}_p95"] = float(np.percentile(values, 95))
-            aggregate_stats[f"{key}_p99"] = float(np.percentile(values, 99))
+            latency_stats[f"{key}_mean"] = float(np.mean(values))
+            latency_stats[f"{key}_std"] = float(np.std(values))
+            latency_stats[f"{key}_p50"] = float(np.percentile(values, 50))
+            latency_stats[f"{key}_p95"] = float(np.percentile(values, 95))
+            latency_stats[f"{key}_p99"] = float(np.percentile(values, 99))
     
     # Vision tokens statistics
     vision_token_values = [s["actual_vision_tokens"] for s in all_per_sample if "actual_vision_tokens" in s]
-    if vision_token_values:
-        aggregate_stats["vision_tokens_mean"] = float(np.mean(vision_token_values))
-        aggregate_stats["vision_tokens_std"] = float(np.std(vision_token_values))
+    vision_tokens_mean = float(np.mean(vision_token_values)) if vision_token_values else 0.0
+    vision_tokens_std = float(np.std(vision_token_values)) if vision_token_values else 0.0
     
     # Actual num_crops statistics
     actual_num_crops_list = [s.get("actual_num_crops", 0) for s in all_per_sample]
-    if actual_num_crops_list:
-        aggregate_stats["selected_crops_mean"] = float(np.mean(actual_num_crops_list))
-        aggregate_stats["selected_crops_std"] = float(np.std(actual_num_crops_list))
+    selected_crops_mean = float(np.mean(actual_num_crops_list)) if actual_num_crops_list else 0.0
+    selected_crops_std = float(np.std(actual_num_crops_list)) if actual_num_crops_list else 0.0
     
     # Target vision tokens statistics
     target_vision_tokens_list = [s.get("target_vision_tokens", 0) for s in all_per_sample]
-    if target_vision_tokens_list:
-        aggregate_stats["target_vision_tokens_mean"] = float(np.mean(target_vision_tokens_list))
-        aggregate_stats["target_vision_tokens_std"] = float(np.std(target_vision_tokens_list))
+    target_vision_tokens_mean = float(np.mean(target_vision_tokens_list)) if target_vision_tokens_list else 0.0
+    target_vision_tokens_std = float(np.std(target_vision_tokens_list)) if target_vision_tokens_list else 0.0
     
     # Selected crops distribution
     selected_crops_distribution = {}
     for crops in actual_num_crops_list:
         selected_crops_distribution[crops] = selected_crops_distribution.get(crops, 0) + 1
     
-    # Update merged_config with merged statistics
+    # Update merged_config with merged statistics (new structure)
     merged_config["selected_crops_distribution"] = selected_crops_distribution
-    merged_config["selected_crops_mean"] = aggregate_stats.get("selected_crops_mean", 0.0)
-    merged_config["selected_crops_std"] = aggregate_stats.get("selected_crops_std", 0.0)
-    merged_config["target_vision_tokens_mean"] = aggregate_stats.get("target_vision_tokens_mean", 0.0)
-    merged_config["target_vision_tokens_std"] = aggregate_stats.get("target_vision_tokens_std", 0.0)
-    merged_config["actual_vision_tokens_mean"] = aggregate_stats.get("vision_tokens_mean", 0.0)
-    merged_config["actual_vision_tokens_std"] = aggregate_stats.get("vision_tokens_std", 0.0)
-    merged_config["aggregate_stats"] = aggregate_stats
+    merged_config["selected_crops_mean"] = selected_crops_mean
+    merged_config["selected_crops_std"] = selected_crops_std
+    merged_config["target_vision_tokens_mean"] = target_vision_tokens_mean
+    merged_config["target_vision_tokens_std"] = target_vision_tokens_std
+    merged_config["actual_vision_tokens_mean"] = vision_tokens_mean
+    merged_config["actual_vision_tokens_std"] = vision_tokens_std
+    merged_config["latency_stats"] = latency_stats
     merged_config["per_sample_results"] = all_per_sample
     
     return merged_config
@@ -598,16 +595,59 @@ class CombinedProfilingExperiment(BaseExperiment):
         """
         Set active transformer blocks using importance-based selection.
         
-        If importance_scores provided, select top-K by importance.
-        Otherwise, use prefix blocks (first N blocks).
-        """
-        if importance_scores is not None and len(importance_scores) > 0:
-            sorted_blocks = sorted(importance_scores.items(), key=lambda x: x[1], reverse=True)
-            block_indices = [idx for idx, _ in sorted_blocks[:num_active]]
-            block_indices = sorted(block_indices)
-        else:
-            block_indices = list(range(min(num_active, total_blocks)))
+        Strategy:
+        - Always keep block 0 (first) and block (total_blocks-1) (last)
+        - For middle blocks (1 to total_blocks-2), select by importance score
+        - Higher importance score = more important = keep it
+        - Lower importance score = less important = prune it first
         
+        Args:
+            num_active: Total number of active blocks desired
+            total_blocks: Total number of transformer blocks
+            importance_scores: Dict mapping block_idx -> importance_score (only for middle blocks, e.g., 1-14)
+        
+        Returns:
+            (block_mask, block_indices): Boolean mask and list of active block indices
+        """
+        # Always keep first and last blocks
+        first_block = 0
+        last_block = total_blocks - 1
+        always_keep = {first_block, last_block}
+        
+        if importance_scores is not None and len(importance_scores) > 0:
+            # Select from middle blocks (1 to total_blocks-2) based on importance
+            # Higher score = more important = keep it
+            # Sort by score descending (highest first)
+            middle_blocks = sorted(importance_scores.items(), key=lambda x: x[1], reverse=True)
+            
+            # Calculate how many middle blocks we need
+            # num_active total = 2 (first + last) + num_middle
+            # If num_active <= 2, only keep first and last
+            if num_active <= 2:
+                block_indices = sorted(list(always_keep))
+            else:
+                num_middle_needed = num_active - 2  # Subtract first and last
+            
+                # Select top-K middle blocks by importance
+                selected_middle = [idx for idx, _ in middle_blocks[:num_middle_needed]]
+                
+                # Combine: always keep + selected middle blocks
+                block_indices = sorted(list(always_keep) + selected_middle)
+            
+            if self.rank == 0:
+                log.debug(f"Importance-based selection: keeping blocks {block_indices} "
+                         f"(first={first_block}, last={last_block}, "
+                         f"middle={selected_middle} from {len(middle_blocks)} candidates)")
+        else:
+            # Fallback: use prefix blocks (first N blocks)
+            block_indices = list(range(min(num_active, total_blocks)))
+            if self.rank == 0:
+                log.debug(f"Prefix selection: keeping first {num_active} blocks: {block_indices}")
+        
+        # Ensure we don't exceed total_blocks
+        block_indices = [idx for idx in block_indices if 0 <= idx < total_blocks]
+        
+        # Create boolean mask
         block_mask = torch.zeros(total_blocks, dtype=torch.bool)
         for idx in block_indices:
             block_mask[idx] = True
@@ -1296,9 +1336,26 @@ class CombinedProfilingExperiment(BaseExperiment):
                         selected_crops_distribution[crops] = selected_crops_distribution.get(crops, 0) + 1
                     
                     # Store results: tier-based mode only
+                    # Remove duplicate stats from aggregate_stats (they're already in top level)
+                    latency_stats = {}
+                    for key in stage_keys:
+                        if f"{key}_mean" in aggregate_stats:
+                            latency_stats[f"{key}_mean"] = aggregate_stats[f"{key}_mean"]
+                            latency_stats[f"{key}_std"] = aggregate_stats[f"{key}_std"]
+                            latency_stats[f"{key}_p50"] = aggregate_stats[f"{key}_p50"]
+                            latency_stats[f"{key}_p95"] = aggregate_stats[f"{key}_p95"]
+                            latency_stats[f"{key}_p99"] = aggregate_stats[f"{key}_p99"]
+                    
+                    # Remove duplicate stats from aggregate_stats
+                    clean_aggregate_stats = {k: v for k, v in aggregate_stats.items() 
+                                           if k not in ["vision_tokens_mean", "vision_tokens_std", 
+                                                       "selected_crops_mean", "selected_crops_std",
+                                                       "target_vision_tokens_mean", "target_vision_tokens_std"]}
+                    
                     config_result = {
                         "tier": tier_name,
                         "tier_range": {"min_crops": tier["min_crops"], "max_crops": tier["max_crops"]},
+                        "max_crops": max_crops,  # max_crops parameter passed to select_tiling
                         "selected_crops_distribution": selected_crops_distribution,
                         "selected_crops_mean": aggregate_stats["selected_crops_mean"],
                         "selected_crops_std": aggregate_stats["selected_crops_std"],
@@ -1306,16 +1363,14 @@ class CombinedProfilingExperiment(BaseExperiment):
                         "target_vision_tokens_std": aggregate_stats["target_vision_tokens_std"],
                         "actual_vision_tokens_mean": aggregate_stats.get("vision_tokens_mean", 0.0),
                         "actual_vision_tokens_std": aggregate_stats.get("vision_tokens_std", 0.0),
-                        "max_crops": max_crops,  # max_crops parameter passed to select_tiling
                         "top_k": top_k,
                         "num_active_blocks": num_active_blocks,
                         "num_total_blocks": total_blocks,
                         "active_block_indices": block_indices,
+                        "num_samples": num_processed,
                         "accuracy": accuracy_mean,
                         "accuracy_std": accuracy_std,
-                        "num_samples": num_processed,
-                        # Aggregate statistics (includes actual values statistics)
-                        "aggregate_stats": aggregate_stats,
+                        "latency_stats": latency_stats,
                         "per_sample_results": per_sample_results,  # Store all samples (will be merged across ranks)
                     }
                     
@@ -1538,6 +1593,8 @@ def main():
                        help="Maximum retries per configuration on error (default: 3)")
     parser.add_argument("--config_retry_delay", type=int, default=5,
                        help="Delay between configuration retries in seconds (default: 5)")
+    parser.add_argument("--importance_scores_file", type=str, default=None,
+                       help="Path to JSON file containing importance scores for block selection")
     
     args = parser.parse_args()
     
@@ -1604,6 +1661,16 @@ def main():
         seed=args.seed,  # Use seed from command line
     )
     
+    # Load importance scores if provided
+    importance_scores = None
+    if hasattr(args, 'importance_scores_file') and args.importance_scores_file:
+        import json
+        log.info(f"Loading importance scores from {args.importance_scores_file}")
+        with open(args.importance_scores_file, 'r') as f:
+            saved_data = json.load(f)
+            importance_scores = {int(k): float(v) for k, v in saved_data.items()}
+        log.info(f"Loaded importance scores for {len(importance_scores)} blocks")
+    
     # Run experiment
     experiment.run(
         dataset_name=args.dataset_name,
@@ -1615,6 +1682,7 @@ def main():
         sampling_strategy=args.sampling_strategy,
         num_samples=args.num_samples if args.num_samples > 0 else None,
         num_runs_per_sample=args.num_runs_per_sample,
+        importance_scores=importance_scores,
         use_profiler=args.use_profiler,
         use_profiler_on_all_samples=args.use_profiler_on_all_samples,
         max_config_retries=args.max_config_retries,
