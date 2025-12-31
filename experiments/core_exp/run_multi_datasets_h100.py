@@ -201,7 +201,7 @@ def main():
     
     # Tier-based vision token control
     # tier_list = ["low", "medium", "high"]  # Available: "low", "medium", "high"
-    tier_list = ["medium", "high"]  # Available: "low", "medium", "high"
+    tier_list = ["low", "medium", "high"]  # Available: "low", "medium", "high"
     top_k_list = [4, 6, 8]  # MoE top-k values
     num_active_blocks_list = [12, 14, 16]  # Number of active transformer blocks
     
@@ -212,7 +212,7 @@ def main():
     # Dataset configurations
     # Format: (dataset_name, split, max_new_tokens)
     datasets = [
-        # ("coco_2014_vqa", "validation", 16),
+        ("coco_2014_vqa", "validation", 16),
         ("text_vqa", "validation", 64),
         ("okvqa", "validation", 16),
         ("science_qa_img", "validation", 16),

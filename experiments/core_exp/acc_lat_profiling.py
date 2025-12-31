@@ -335,6 +335,87 @@ def _generate_config_filename(config_result: Dict[str, Any], dataset_name: str, 
     return filename
 
 
+def _merge_config_results(gathered_configs: List[Dict], template_config: Dict) -> Dict:
+    """
+    Merge configuration results from all ranks.
+    
+    Args:
+        gathered_configs: List of config results from all ranks (may contain None for failed ranks)
+        template_config: Template config result (from rank 0) for structure reference
+    
+    Returns:
+        Merged configuration result
+    """
+    # Collect all per_sample_results from all ranks
+    all_per_sample = []
+    for rank_config in gathered_configs:
+        if rank_config is not None:
+            all_per_sample.extend(rank_config.get("per_sample_results", []))
+    
+    if not all_per_sample:
+        # No samples collected, return template with empty results
+        return template_config
+    
+    # Recompute statistics from all samples
+    merged_config = template_config.copy()
+    
+    # Accuracy statistics
+    accuracy_values = [s["accuracy"] for s in all_per_sample if "accuracy" in s]
+    if accuracy_values:
+        merged_config["accuracy"] = float(np.mean(accuracy_values))
+        merged_config["accuracy_std"] = float(np.std(accuracy_values))
+        merged_config["num_samples"] = len(all_per_sample)
+    
+    # Recompute aggregate stats
+    stage_keys = ["T_vision_encoder", "T_projector", "T_vision_total", 
+                 "T_LLM_prefill", "T_LLM_decode", "T_total", "T_decode_per_token"]
+    aggregate_stats = {}
+    for key in stage_keys:
+        values = [s[key] for s in all_per_sample if key in s]
+        if values:
+            aggregate_stats[f"{key}_mean"] = float(np.mean(values))
+            aggregate_stats[f"{key}_std"] = float(np.std(values))
+            aggregate_stats[f"{key}_p50"] = float(np.percentile(values, 50))
+            aggregate_stats[f"{key}_p95"] = float(np.percentile(values, 95))
+            aggregate_stats[f"{key}_p99"] = float(np.percentile(values, 99))
+    
+    # Vision tokens statistics
+    vision_token_values = [s["actual_vision_tokens"] for s in all_per_sample if "actual_vision_tokens" in s]
+    if vision_token_values:
+        aggregate_stats["vision_tokens_mean"] = float(np.mean(vision_token_values))
+        aggregate_stats["vision_tokens_std"] = float(np.std(vision_token_values))
+    
+    # Actual num_crops statistics
+    actual_num_crops_list = [s.get("actual_num_crops", 0) for s in all_per_sample]
+    if actual_num_crops_list:
+        aggregate_stats["selected_crops_mean"] = float(np.mean(actual_num_crops_list))
+        aggregate_stats["selected_crops_std"] = float(np.std(actual_num_crops_list))
+    
+    # Target vision tokens statistics
+    target_vision_tokens_list = [s.get("target_vision_tokens", 0) for s in all_per_sample]
+    if target_vision_tokens_list:
+        aggregate_stats["target_vision_tokens_mean"] = float(np.mean(target_vision_tokens_list))
+        aggregate_stats["target_vision_tokens_std"] = float(np.std(target_vision_tokens_list))
+    
+    # Selected crops distribution
+    selected_crops_distribution = {}
+    for crops in actual_num_crops_list:
+        selected_crops_distribution[crops] = selected_crops_distribution.get(crops, 0) + 1
+    
+    # Update merged_config with merged statistics
+    merged_config["selected_crops_distribution"] = selected_crops_distribution
+    merged_config["selected_crops_mean"] = aggregate_stats.get("selected_crops_mean", 0.0)
+    merged_config["selected_crops_std"] = aggregate_stats.get("selected_crops_std", 0.0)
+    merged_config["target_vision_tokens_mean"] = aggregate_stats.get("target_vision_tokens_mean", 0.0)
+    merged_config["target_vision_tokens_std"] = aggregate_stats.get("target_vision_tokens_std", 0.0)
+    merged_config["actual_vision_tokens_mean"] = aggregate_stats.get("vision_tokens_mean", 0.0)
+    merged_config["actual_vision_tokens_std"] = aggregate_stats.get("vision_tokens_std", 0.0)
+    merged_config["aggregate_stats"] = aggregate_stats
+    merged_config["per_sample_results"] = all_per_sample
+    
+    return merged_config
+
+
 class CombinedProfilingExperiment(BaseExperiment):
     """
     Combined Profiling: Measure accuracy and latency for different combinations of:
@@ -663,6 +744,38 @@ class CombinedProfilingExperiment(BaseExperiment):
             tier, top_k, num_active_blocks = combo
             tier_name = tier["name"]
             max_crops = tier["max_crops"]  # Use tier max_crops as upper bound
+            
+            # Check if result already exists (skip if found)
+            # Use glob pattern to find matching files (crops value may vary)
+            if self.rank == 0:
+                task_name = self.dataset_name.replace("_", "-")
+                pattern = f"{task_name}_imgsizetier-{tier_name}_crops*_topk{top_k}_blocks{num_active_blocks}.json"
+                matching_files = list(Path(self.output_dir).glob(pattern))
+                # Filter out rank-specific files
+                matching_files = [f for f in matching_files if "_rank" not in f.name]
+                
+                if matching_files:
+                    log.info(f"{Colors.BRIGHT_YELLOW}Config {config_idx+1}/{len(combinations)}:{Colors.RESET} "
+                             f"{Colors.BRIGHT_YELLOW}tier={tier_name}{Colors.RESET}, "
+                             f"{Colors.BRIGHT_YELLOW}top_k={top_k}{Colors.RESET}, "
+                             f"{Colors.BRIGHT_YELLOW}blocks={num_active_blocks}{Colors.RESET} - "
+                             f"{Colors.CYAN}Result already exists, skipping{Colors.RESET}")
+                    # Skip this configuration - need to synchronize across ranks
+                    if self.is_distributed:
+                        # Broadcast skip signal to all ranks
+                        skip_signal = torch.tensor([1], device=self.device)  # 1 = skip
+                        dist.broadcast(skip_signal, src=0)
+                    continue
+                elif self.is_distributed:
+                    # Broadcast continue signal to all ranks
+                    skip_signal = torch.tensor([0], device=self.device)  # 0 = don't skip
+                    dist.broadcast(skip_signal, src=0)
+            elif self.is_distributed:
+                # Other ranks wait for skip signal
+                skip_signal = torch.tensor([0], device=self.device)  # 0 = don't skip
+                dist.broadcast(skip_signal, src=0)
+                if skip_signal.item() == 1:
+                    continue  # Skip this configuration
             
             if self.rank == 0:
                 # Concise configuration header (no leading newline to avoid extra blank line)
@@ -1140,8 +1253,11 @@ class CombinedProfilingExperiment(BaseExperiment):
                     if per_sample_results:
                         # Accuracy statistics
                         accuracy_values = [s["accuracy"] for s in per_sample_results]
-                    accuracy_mean = float(np.mean(accuracy_values))
-                    accuracy_std = float(np.std(accuracy_values))
+                        accuracy_mean = float(np.mean(accuracy_values))
+                        accuracy_std = float(np.std(accuracy_values))
+                    else:
+                        accuracy_mean = 0.0
+                        accuracy_std = 0.0
                     
                     # Latency statistics
                     stage_keys = ["T_vision_encoder", "T_projector", "T_vision_total", 
@@ -1210,7 +1326,6 @@ class CombinedProfilingExperiment(BaseExperiment):
                     results.append(config_result)
                     
                     # Save intermediate results (each rank saves its own results for fault tolerance)
-                    # These will be merged later and the rank-specific files will be deleted
                     # Generate descriptive filename with control knob info
                     base_filename = _generate_config_filename(config_result, self.dataset_name, use_tier=True)
                     if self.is_distributed:
@@ -1221,8 +1336,38 @@ class CombinedProfilingExperiment(BaseExperiment):
                         output_file = Path(self.output_dir) / base_filename
                     with open(output_file, 'w') as f:
                         json.dump(config_result, f, indent=2)
-                    # Don't log intermediate results (they're merged later, and logging adds clutter)
-                    # Intermediate files are automatically cleaned up after merging
+                    
+                    # Immediately merge results from all ranks for this configuration
+                    if self.is_distributed:
+                        # Gather this config's result from all ranks
+                        # Only rank 0 should provide gather_list, other ranks pass None
+                        if self.rank == 0:
+                            gathered_configs = [None] * self.world_size
+                            dist.gather_object(config_result, gathered_configs, dst=0)
+                            
+                            # Merge results from all ranks for this configuration
+                            merged_config = _merge_config_results(gathered_configs, config_result)
+                            
+                            # Save merged result
+                            merged_output_file = Path(self.output_dir) / base_filename
+                            with open(merged_output_file, 'w') as f:
+                                json.dump(merged_config, f, indent=2)
+                            
+                            # Clean up rank-specific files for this config immediately
+                            base_name = base_filename.replace(".json", "")
+                            for rank_idx in range(self.world_size):
+                                rank_file = Path(self.output_dir) / f"{base_name}_rank{rank_idx}.json"
+                                if rank_file.exists():
+                                    try:
+                                        rank_file.unlink()
+                                    except Exception:
+                                        pass  # Silently ignore cleanup errors
+                        else:
+                            # Other ranks: pass None as gather_list
+                            dist.gather_object(config_result, None, dst=0)
+                    else:
+                        # Non-distributed: file already saved above
+                        pass
                     
                     # Memory optimization: clear cache between configurations
                     # Only on A100 to avoid affecting H100 performance
@@ -1341,127 +1486,10 @@ class CombinedProfilingExperiment(BaseExperiment):
         if self.block_mask_wrapper is not None:
             self.block_mask_wrapper.remove()
         
-        # Gather results from all ranks if distributed
-        if self.is_distributed:
-            try:
-                if self.rank == 0:
-                    gathered_results = [None] * self.world_size
-                    dist.gather_object(results, gathered_results, dst=0)
-                    
-                    # Merge results from all ranks
-                    # Group by config (tier, top_k, num_active_blocks)
-                    config_dict = {}
-                    for rank_results in gathered_results:
-                        if rank_results is not None:
-                            for config_result in rank_results:
-                                config_key = (
-                                    config_result.get("tier"),
-                                    config_result.get("top_k"),
-                                    config_result.get("num_active_blocks")
-                                )
-                                if config_key not in config_dict:
-                                    config_dict[config_key] = config_result.copy()
-                                    config_dict[config_key]["per_sample_results"] = []
-                                # Merge per_sample_results
-                                config_dict[config_key]["per_sample_results"].extend(
-                                    config_result.get("per_sample_results", [])
-                                )
-                    
-                    # Recompute aggregate statistics from merged results
-                    merged_results = []
-                    config_idx_map = {}  # Map config_key to original config_idx
-                    
-                    # First pass: build config_idx_map from gathered results
-                    for rank_idx, rank_results in enumerate(gathered_results):
-                        if rank_results is not None:
-                            for orig_config_idx, config_result in enumerate(rank_results):
-                                config_key = (
-                                    config_result.get("tier"),
-                                    config_result.get("top_k"),
-                                    config_result.get("num_active_blocks")
-                                )
-                                if config_key not in config_idx_map:
-                                    # Use the first rank's config_idx as the canonical one
-                                    config_idx_map[config_key] = orig_config_idx
-                    
-                    # Second pass: merge and save each config
-                    for config_key, config_result in config_dict.items():
-                        all_per_sample = config_result["per_sample_results"]
-                        if all_per_sample:
-                            # Recompute statistics from all samples
-                            accuracy_values = [s["accuracy"] for s in all_per_sample]
-                            config_result["accuracy"] = float(np.mean(accuracy_values))
-                            config_result["accuracy_std"] = float(np.std(accuracy_values))
-                            config_result["num_samples"] = len(all_per_sample)
-                            
-                            # Recompute aggregate stats
-                            stage_keys = ["T_vision_encoder", "T_projector", "T_vision_total", 
-                                         "T_LLM_prefill", "T_LLM_decode", "T_total", "T_decode_per_token"]
-                            aggregate_stats = {}
-                            for key in stage_keys:
-                                values = [s[key] for s in all_per_sample if key in s]
-                                if values:
-                                    aggregate_stats[f"{key}_mean"] = float(np.mean(values))
-                                    aggregate_stats[f"{key}_std"] = float(np.std(values))
-                                    aggregate_stats[f"{key}_p50"] = float(np.percentile(values, 50))
-                                    aggregate_stats[f"{key}_p95"] = float(np.percentile(values, 95))
-                                    aggregate_stats[f"{key}_p99"] = float(np.percentile(values, 99))
-                            
-                            vision_token_values = [s["actual_vision_tokens"] for s in all_per_sample]
-                            aggregate_stats["vision_tokens_mean"] = float(np.mean(vision_token_values))
-                            aggregate_stats["vision_tokens_std"] = float(np.std(vision_token_values))
-                            
-                            # Actual num_crops statistics (per-image selection within tier)
-                            actual_num_crops_list = [s.get("actual_num_crops", 0) for s in all_per_sample]
-                            aggregate_stats["selected_crops_mean"] = float(np.mean(actual_num_crops_list)) if actual_num_crops_list else 0.0
-                            aggregate_stats["selected_crops_std"] = float(np.std(actual_num_crops_list)) if actual_num_crops_list else 0.0
-                            
-                            # Target vision tokens statistics (theoretical for selected crops)
-                            target_vision_tokens_list = [s.get("target_vision_tokens", 0) for s in all_per_sample]
-                            aggregate_stats["target_vision_tokens_mean"] = float(np.mean(target_vision_tokens_list)) if target_vision_tokens_list else 0.0
-                            aggregate_stats["target_vision_tokens_std"] = float(np.std(target_vision_tokens_list)) if target_vision_tokens_list else 0.0
-                            
-                            # Update config_result with tier-specific statistics
-                            selected_crops_distribution = {}
-                            for crops in actual_num_crops_list:
-                                selected_crops_distribution[crops] = selected_crops_distribution.get(crops, 0) + 1
-                            config_result["selected_crops_distribution"] = selected_crops_distribution
-                            config_result["selected_crops_mean"] = aggregate_stats["selected_crops_mean"]
-                            config_result["selected_crops_std"] = aggregate_stats["selected_crops_std"]
-                            config_result["target_vision_tokens_mean"] = aggregate_stats["target_vision_tokens_mean"]
-                            config_result["target_vision_tokens_std"] = aggregate_stats["target_vision_tokens_std"]
-                            config_result["actual_vision_tokens_mean"] = aggregate_stats["vision_tokens_mean"]
-                            config_result["actual_vision_tokens_std"] = aggregate_stats["vision_tokens_std"]
-                            
-                            config_result["aggregate_stats"] = aggregate_stats
-                            # Store all per_sample_results
-                            config_result["per_sample_results"] = all_per_sample
-                        
-                        merged_results.append(config_result)
-                        
-                        # Save merged result for this config (one file per config, all ranks merged)
-                        # Use descriptive filename with control knob info
-                        # Generate filename with tier info
-                        output_file = Path(self.output_dir) / _generate_config_filename(
-                            config_result, 
-                            self.dataset_name, 
-                            use_tier=True
-                        )
-                        with open(output_file, 'w') as f:
-                            json.dump(config_result, f, indent=2)
-                        # Don't log each merged file individually - log summary at the end instead
-                    
-                    results = merged_results
-                    # Don't log merge summary - it's redundant with completion message
-                else:
-                    dist.gather_object(results, None, dst=0)
-                    # Don't log "Sent results" - it's expected behavior and adds clutter
-            except Exception as e:
-                log.error(f"Rank {self.rank}: Failed to gather results: {e}")
-                if self.rank == 0:
-                    log.warning("Gather failed, using rank 0 results only")
+        # Results are already merged and saved per configuration (immediate merge)
+        # No need for final merge step
         
-        # Clean up intermediate rank-specific files (only on rank 0, after all configs are saved)
+        # Clean up any remaining intermediate rank-specific files (safety check)
         if self.rank == 0:
             # Log completion summary (concise)
             task_name_pattern = self.dataset_name.replace("_", "-")

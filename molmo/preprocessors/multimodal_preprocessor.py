@@ -402,9 +402,8 @@ def select_tiling(h, w, patch_size, max_num_crops, tier=None, original_h=None, o
         best_tiling = None
         best_mismatch = float('inf')
         
-        # Debug: track all mismatches for analysis
+        # Debug: track mismatches for tier range
         tier_mismatches = {}  # crops -> mismatch for tier range
-        all_mismatches = {}  # crops -> mismatch for all crops (for debugging)
         
         # First, try preferred crop counts
         for crops in preferred_crops:
@@ -413,7 +412,6 @@ def select_tiling(h, w, patch_size, max_num_crops, tier=None, original_h=None, o
             tiling, mismatch = find_best_tiling_for_crops(crops)
             if tiling is not None:
                 tier_mismatches[crops] = mismatch
-                all_mismatches[crops] = mismatch
                 if mismatch < best_mismatch:
                     best_mismatch = mismatch
                     best_crops = crops
@@ -427,7 +425,6 @@ def select_tiling(h, w, patch_size, max_num_crops, tier=None, original_h=None, o
             tiling, mismatch = find_best_tiling_for_crops(crops)
             if tiling is not None:
                 tier_mismatches[crops] = mismatch
-                all_mismatches[crops] = mismatch
                 if mismatch < best_mismatch:
                     best_mismatch = mismatch
                     best_crops = crops
@@ -440,99 +437,43 @@ def select_tiling(h, w, patch_size, max_num_crops, tier=None, original_h=None, o
             log = logging.getLogger(__name__)
             tier_name = tier.get('name', 'unknown')
             
-            # Always log tier selection details for debugging (especially for high tier)
-            # This helps understand why certain crops are selected
+            # Log tier selection details for debugging
+            # Note: We always use tier range to maintain latency predictability,
+            # even if mismatch is large. Image quality is preserved by resize_and_pad
+            # which uses min(scale_x, scale_y) to maintain aspect ratio with padding.
             log.debug(
-                f"[select_tiling] Sample tier={tier_name} (min={min_crops}, max={max_crops_in_tier}), "
+                f"[select_tiling] FINAL SELECTION: tier={tier_name} (min={min_crops}, max={max_crops_in_tier}), "
+                f"selected {best_crops} crops (tiling={best_tiling}), "
                 f"image_aspect_ratio={aspect_ratio:.4f}, "
-                f"tier_range_mismatches={tier_mismatches}, "
-                f"best_in_tier: {best_crops} crops (mismatch={best_mismatch:.4f})"
+                f"mismatch={best_mismatch:.4f}, "
+                f"tier_range_mismatches={tier_mismatches}"
             )
-            
-            # If tier range mismatch is too large (e.g., >0.5), consider relaxing tier constraint
-            # to avoid severe distortion. This allows using crops outside tier if they match much better.
-            tier_relaxation_threshold = tier.get("tier_relaxation_threshold", 0.5)
-            if best_mismatch > tier_relaxation_threshold:
-                # Tier range mismatch is large, try all possible crops to find better match
-                best_crops_outside = None
-                best_tiling_outside = None
-                best_mismatch_outside = float('inf')
-                outside_mismatches = {}
-                
-                for crops in range(1, max_num_crops + 1):
-                    if min_crops <= crops <= max_crops_in_tier:
-                        continue  # Already tried in tier range
-                    tiling, mismatch = find_best_tiling_for_crops(crops)
-                    if tiling is not None:
-                        outside_mismatches[crops] = mismatch
-                        all_mismatches[crops] = mismatch
-                        if mismatch < best_mismatch_outside:
-                            best_mismatch_outside = mismatch
-                            best_crops_outside = crops
-                            best_tiling_outside = tiling
-                
-                # Log tier relaxation evaluation
-                log.debug(
-                    f"[select_tiling] tier={tier_name} (min={min_crops}, max={max_crops_in_tier}) tier_relaxation triggered: "
-                    f"best_mismatch_in_tier={best_mismatch:.4f} > {tier_relaxation_threshold}, "
-                    f"image_aspect_ratio={aspect_ratio:.3f}, "
-                    f"tier_range_mismatches={tier_mismatches}, "
-                    f"outside_mismatches={outside_mismatches}, "
-                    f"best_in_tier: {best_crops} crops (mismatch={best_mismatch:.4f}), "
-                    f"best_outside: {best_crops_outside} crops (mismatch={best_mismatch_outside:.4f})"
-                )
-                
-                # Use tier range if outside tier doesn't provide significantly better match
-                # (difference < 0.1), otherwise use outside tier to avoid distortion
-                # BUT: Only allow relaxation if the outside tier match is MUCH better (difference > 0.2)
-                # and the outside tier mismatch is still reasonable (< 0.3)
-                # This prevents high tier from frequently selecting low/medium tier crops
-                if (best_tiling_outside is not None and 
-                    best_mismatch_outside < best_mismatch - 0.2 and 
-                    best_mismatch_outside < 0.3):
-                    # Outside tier has significantly better match AND it's still reasonable, use it
-                    final_crops = best_crops_outside
-                    final_tiling = best_tiling_outside
-                    log.warning(
-                        f"[select_tiling] Tier relaxation ACCEPTED: tier={tier_name} (min={min_crops}, max={max_crops_in_tier}) "
-                        f"selected {best_crops_outside} crops (outside tier) instead of {best_crops} crops (in tier). "
-                        f"Mismatch: {best_mismatch_outside:.4f} (outside) vs {best_mismatch:.4f} (in tier). "
-                        f"Image aspect_ratio={aspect_ratio:.4f}. "
-                        f"All mismatches: {all_mismatches}"
-                    )
-                else:
-                    # Otherwise, use tier range (even if mismatch is large, to respect tier constraint)
-                    final_crops = best_crops
-                    final_tiling = best_tiling
-                    log.debug(
-                        f"[select_tiling] Tier relaxation REJECTED: tier={tier_name} "
-                        f"outside mismatch improvement ({best_mismatch:.4f} - {best_mismatch_outside:.4f} = {best_mismatch - best_mismatch_outside:.4f}) "
-                        f"< 0.2 OR outside mismatch ({best_mismatch_outside:.4f}) >= 0.3. "
-                        f"Using tier range: {best_crops} crops (mismatch={best_mismatch:.4f})"
-                    )
-                # Log final selection
-                log.debug(
-                    f"[select_tiling] FINAL SELECTION: tier={tier_name}, "
-                    f"selected {final_crops} crops (tiling={final_tiling}), "
-                    f"image_aspect_ratio={aspect_ratio:.4f}"
-                )
-                return final_tiling
-            else:
-                # Tier range has acceptable match, use it
-                log.debug(
-                    f"[select_tiling] FINAL SELECTION: tier={tier_name}, "
-                    f"selected {best_crops} crops (tiling={best_tiling}), "
-                    f"image_aspect_ratio={aspect_ratio:.4f}, "
-                    f"mismatch={best_mismatch:.4f} (acceptable, <= {tier_relaxation_threshold})"
-                )
             return best_tiling
-        # Fallback: use smallest tiling in tier (but ensure it's within max_num_crops)
+        
+        # Fallback: if no valid tiling found in tier range, use the one with smallest mismatch
+        # This handles cases where some crops are prime numbers (invalid) but others are valid
+        if tier_mismatches:
+            # Use the crop count with smallest mismatch from those that found valid tilings
+            best_fallback_crops = min(tier_mismatches, key=tier_mismatches.get)
+            fallback_tiling, _ = find_best_tiling_for_crops(best_fallback_crops)
+            if fallback_tiling is not None:
+                import logging
+                log = logging.getLogger(__name__)
+                tier_name = tier.get('name', 'unknown')
+                log.debug(
+                    f"[select_tiling] FALLBACK: tier={tier_name}, "
+                    f"using crops={best_fallback_crops} (mismatch={tier_mismatches[best_fallback_crops]:.4f}) "
+                    f"from valid options in tier range"
+                )
+                return fallback_tiling
+        
+        # Last resort: if no valid tiling found at all in tier range, use smallest crops
         # If min_crops > max_num_crops, we can't satisfy tier requirement, so use max_num_crops
         fallback_crops = min(min_crops, max_num_crops)
         fallback_tiling, _ = find_best_tiling_for_crops(fallback_crops)
         if fallback_tiling is not None:
             return fallback_tiling
-        # Last resort: use (1, fallback_crops) or (1, 1) if fallback_crops is too large
+        # Final fallback: use (1, fallback_crops) or (1, 1) if fallback_crops is too large
         if fallback_crops <= max_num_crops:
             return (1, fallback_crops)
         else:
