@@ -210,7 +210,7 @@ def main():
     base_output_dir = "./results/core_exp_a100"
     
     # Importance scores file (for block selection)
-    importance_scores_file = "./results/profiling/exp3_accuracy_sensitivity/layer_importance_scores.json"
+    importance_scores_file = "./results/layer_importance_scores.json"
     
     # Sampling configuration (reduced for A100 memory constraints)
     num_samples = 1000
