@@ -617,8 +617,11 @@ class CombinedProfilingExperiment(BaseExperiment):
         if importance_scores is not None and len(importance_scores) > 0:
             # Select from middle blocks (1 to total_blocks-2) based on importance
             # Higher score = more important = keep it
-            # Sort by score descending (highest first)
-            middle_blocks = sorted(importance_scores.items(), key=lambda x: x[1], reverse=True)
+            # IMPORTANT: Filter out first and last blocks before sorting
+            # to avoid selecting them twice (they're always kept)
+            middle_blocks_only = [(idx, score) for idx, score in importance_scores.items() 
+                                  if idx not in always_keep]
+            middle_blocks = sorted(middle_blocks_only, key=lambda x: x[1], reverse=True)
             
             # Calculate how many middle blocks we need
             # num_active total = 2 (first + last) + num_middle
