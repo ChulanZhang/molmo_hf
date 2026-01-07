@@ -20,6 +20,7 @@ import sys
 import os
 import time
 import json
+from pathlib import Path
 from typing import Dict, List, Any, Optional, Tuple
 from dataclasses import dataclass
 from collections import defaultdict
@@ -152,8 +153,41 @@ class Exp3SensitivityExperimentV2(BaseExperiment):
                     f"Please use --nproc-per-node={num_gpus} or fewer."
                 )
             device = f"cuda:{local_rank}"
-            torch.cuda.set_device(local_rank)
+            
+            # Stagger device initialization to avoid OOM from concurrent model loading
+            # Each rank waits a bit before setting device, with rank 0 going first
+            import time
+            time.sleep(local_rank * 0.5)  # Stagger by 0.5s per rank
+            
+            # Clear CUDA cache before setting device to avoid OOM
+            # Each rank clears its own cache
+            try:
+                # Try to set device first (may fail if GPU is already in use)
+                torch.cuda.set_device(local_rank)
+            except RuntimeError as e:
+                if "out of memory" in str(e).lower() or "CUDA error" in str(e):
+                    # Clear cache and wait a bit longer
+                    torch.cuda.empty_cache()
+                    torch.cuda.synchronize()
+                    time.sleep(2.0 + local_rank * 0.5)  # Wait longer for other processes
+                    # Retry
+                    torch.cuda.empty_cache()
+                    torch.cuda.set_device(local_rank)
+                else:
+                    raise
+            
+            # Synchronize after device is set
+            torch.cuda.synchronize()
+            
             log.info(f"Rank {self.rank} (local_rank {local_rank}) using device {device}")
+        
+        # Clear cache again before loading model (model loading is memory-intensive)
+        if self.is_distributed:
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+            # Additional stagger before model loading
+            import time
+            time.sleep(self.rank * 0.3)
         
         super().__init__(
             model_path=model_path,
@@ -162,6 +196,11 @@ class Exp3SensitivityExperimentV2(BaseExperiment):
             num_warmup=num_warmup,
             hf_cache_dir=hf_cache_dir,
         )
+        
+        # Clear cache after model is loaded
+        if self.is_distributed:
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
     
     def _find_optimal_batch_size(
         self,
@@ -343,56 +382,101 @@ class Exp3SensitivityExperimentV2(BaseExperiment):
         
         with torch.inference_mode():
             for batch_idx, batch in enumerate(tqdm(dataloader, total=total_batches)):
-                batch = {k: v.to(self.device, non_blocking=True) if isinstance(v, torch.Tensor) else v 
-                        for k, v in batch.items()}
-                
-                from transformers import GenerationConfig
-                
-                eos_token_id = self.tokenizer.eos_token_id
-                if eos_token_id is None:
-                    eos_token_id = getattr(self.model.config, 'eos_token_id', None)
-                
-                pad_token_id = self.tokenizer.pad_token_id
-                if pad_token_id is None:
-                    pad_token_id = getattr(self.model.config, 'pad_token_id', None)
-                
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-                
-                if hasattr(self.model.model, '_MolmoModel__cache'):
-                    self.model.model._MolmoModel__cache.clear()
-                
-                generation_config = GenerationConfig(
-                    max_new_tokens=max_new_tokens,
-                    do_sample=False,
-                    use_cache=True,
-                    eos_token_id=eos_token_id,
-                    pad_token_id=pad_token_id,
-                )
-                
-                # Disable autocast to avoid dtype mismatch in index_add_ operation
-                # (image_flat becomes BFloat16 but x_flat remains Float32)
-                # Since we're focusing on accuracy, not latency, this is acceptable
-                outputs = self.model.generate(
-                    input_ids=batch["input_ids"],
-                    images=batch.get("images"),
-                    image_masks=batch.get("image_masks"),
-                    image_input_idx=batch.get("image_input_idx"),
-                    generation_config=generation_config,
-                )
-                
-                batch_accuracy = self.compute_accuracy(
-                    batch=batch,
-                    predictions=outputs,
-                    metric_name=metric_name,
-                )
-                
-                all_scores.extend([s["score"] for s in batch_accuracy["per_sample_scores"]])
-                all_predictions.extend(batch_accuracy["per_sample_scores"])
-                
-                # Stop if we've collected enough samples
-                if max_samples_per_rank is not None and len(all_scores) >= max_samples_per_rank:
-                    break
+                try:
+                    batch = {k: v.to(self.device, non_blocking=True) if isinstance(v, torch.Tensor) else v 
+                            for k, v in batch.items()}
+                    
+                    from transformers import GenerationConfig
+                    
+                    eos_token_id = self.tokenizer.eos_token_id
+                    if eos_token_id is None:
+                        eos_token_id = getattr(self.model.config, 'eos_token_id', None)
+                    
+                    pad_token_id = self.tokenizer.pad_token_id
+                    if pad_token_id is None:
+                        pad_token_id = getattr(self.model.config, 'pad_token_id', None)
+                    
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                    
+                    if hasattr(self.model.model, '_MolmoModel__cache'):
+                        self.model.model._MolmoModel__cache.clear()
+                    
+                    generation_config = GenerationConfig(
+                        max_new_tokens=max_new_tokens,
+                        do_sample=False,
+                        use_cache=True,
+                        eos_token_id=eos_token_id,
+                        pad_token_id=pad_token_id,
+                    )
+                    
+                    # Disable autocast to avoid dtype mismatch in index_add_ operation
+                    # (image_flat becomes BFloat16 but x_flat remains Float32)
+                    # Since we're focusing on accuracy, not latency, this is acceptable
+                    outputs = self.model.generate(
+                        input_ids=batch["input_ids"],
+                        images=batch.get("images"),
+                        image_masks=batch.get("image_masks"),
+                        image_input_idx=batch.get("image_input_idx"),
+                        generation_config=generation_config,
+                    )
+                    
+                    # Move outputs to CPU immediately to avoid CUDA errors during tensor destruction
+                    if isinstance(outputs, torch.Tensor):
+                        outputs = outputs.cpu()
+                    
+                    batch_accuracy = self.compute_accuracy(
+                        batch=batch,
+                        predictions=outputs,
+                        metric_name=metric_name,
+                    )
+                    
+                    all_scores.extend([s["score"] for s in batch_accuracy["per_sample_scores"]])
+                    all_predictions.extend(batch_accuracy["per_sample_scores"])
+                    
+                    # Explicitly delete tensors to free memory immediately
+                    del outputs
+                    if isinstance(batch, dict):
+                        for k, v in batch.items():
+                            if isinstance(v, torch.Tensor):
+                                del v
+                    del batch
+                    
+                    # Force cleanup after each batch
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                        torch.cuda.synchronize()
+                    
+                    # Stop if we've collected enough samples
+                    if max_samples_per_rank is not None and len(all_scores) >= max_samples_per_rank:
+                        break
+                        
+                except RuntimeError as e:
+                    error_msg = str(e)
+                    if "CUDA" in error_msg or "cuda" in error_msg.lower():
+                        if not self.is_distributed or self.rank == 0:
+                            log.error(f"CUDA error at batch {batch_idx}: {error_msg}")
+                            log.error(f"Error type: {type(e).__name__}")
+                        
+                        # Try to recover by clearing cache
+                        if torch.cuda.is_available():
+                            try:
+                                torch.cuda.empty_cache()
+                                torch.cuda.synchronize()
+                            except:
+                                pass
+                        
+                        # Re-raise to let outer error handling catch it
+                        raise
+                    else:
+                        # Re-raise non-CUDA errors
+                        raise
+                except Exception as e:
+                    # Log and re-raise other errors
+                    if not self.is_distributed or self.rank == 0:
+                        log.error(f"Error at batch {batch_idx}: {e}")
+                        log.error(f"Error type: {type(e).__name__}")
+                    raise
         
         overall_accuracy = np.mean(all_scores) if all_scores else 0.0
         return overall_accuracy, all_predictions
@@ -423,9 +507,9 @@ class Exp3SensitivityExperimentV2(BaseExperiment):
         from molmo.data.data_formatter import DataFormatter
         from molmo.data.collator import MMCollator
         from molmo.data.dataset import DeterministicDataset
+        from torch.utils.data import ConcatDataset
         
-        dataset = get_dataset_by_name(dataset_name, split=split)
-        
+        # Prepare preprocessor first (needed for both single and combined splits)
         mm_preprocessor = MultiModalPreprocessor(
             tokenizer=self.tokenizer,
             crop_mode=self.model.config.crop_mode,
@@ -447,7 +531,32 @@ class Exp3SensitivityExperimentV2(BaseExperiment):
             for_inference=True,
         )
         
-        det_dataset = DeterministicDataset(dataset, preprocessor, seed=42)
+        # Support combining multiple splits (e.g., "train+validation")
+        # IMPORTANT: Apply DeterministicDataset to each split BEFORE concatenating
+        # because ConcatDataset doesn't have the 'get' method that DeterministicDataset expects
+        if "+" in split:
+            splits = [s.strip() for s in split.split("+")]
+            det_datasets = []
+            for s in splits:
+                try:
+                    ds = get_dataset_by_name(dataset_name, split=s)
+                    # Apply DeterministicDataset to each split before concatenating
+                    det_ds = DeterministicDataset(ds, preprocessor, seed=42)
+                    det_datasets.append(det_ds)
+                    if not self.is_distributed or self.rank == 0:
+                        log.info(f"Loaded {dataset_name} {s} split: {len(ds)} samples")
+                except Exception as e:
+                    if not self.is_distributed or self.rank == 0:
+                        log.warning(f"Failed to load {dataset_name} {s} split: {e}, skipping")
+            if not det_datasets:
+                raise ValueError(f"Failed to load any split for {dataset_name}")
+            det_dataset = ConcatDataset(det_datasets) if len(det_datasets) > 1 else det_datasets[0]
+            if not self.is_distributed or self.rank == 0:
+                total_samples = sum(len(ds) for ds in det_datasets) if len(det_datasets) > 1 else len(det_datasets[0])
+                log.info(f"Combined dataset: {total_samples} total samples from {len(det_datasets)} split(s)")
+        else:
+            dataset = get_dataset_by_name(dataset_name, split=split)
+            det_dataset = DeterministicDataset(dataset, preprocessor, seed=42)
         
         if self.is_distributed:
             sampler = DistributedSampler(
@@ -527,11 +636,42 @@ class Exp3SensitivityExperimentV2(BaseExperiment):
         if not self.is_distributed or self.rank == 0:
             log.info(f"Exploring importance of all layers {layers_to_explore} (including first and last)")
         
+        # Load existing results for checkpoint resumption
         importance_scores = {}
+        results_dir = Path(self.output_dir)
+        results_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Check for existing individual results
+        for layer_idx in layers_to_explore:
+            result_file = results_dir / f"sensitivity_block_{layer_idx}.json"
+            if result_file.exists():
+                try:
+                    with open(result_file, 'r') as f:
+                        result_data = json.load(f)
+                        importance_scores[layer_idx] = result_data.get("importance_score", None)
+                        if importance_scores[layer_idx] is not None:
+                            if not self.is_distributed or self.rank == 0:
+                                log.info(f"✓ Loaded existing result for block {layer_idx}: "
+                                        f"importance_score={importance_scores[layer_idx]:.4f}")
+                except Exception as e:
+                    if not self.is_distributed or self.rank == 0:
+                        log.warning(f"Failed to load result for block {layer_idx}: {e}, will recompute")
+                    importance_scores[layer_idx] = None
+        
+        # Filter out already completed layers
+        remaining_layers = [idx for idx in layers_to_explore if idx not in importance_scores or importance_scores[idx] is None]
+        
+        if not self.is_distributed or self.rank == 0:
+            if remaining_layers:
+                log.info(f"Resuming: {len(remaining_layers)} blocks remaining, {len(layers_to_explore) - len(remaining_layers)} already completed")
+            else:
+                log.info(f"All {len(layers_to_explore)} blocks already completed, loading from checkpoints")
+                return importance_scores
+        
         mask_wrapper = None
         
         try:
-            for layer_idx in layers_to_explore:
+            for layer_idx in remaining_layers:
                 if not self.is_distributed or self.rank == 0:
                     log.info(f"Ablating layer {layer_idx}/{total_blocks-1}")
                 
@@ -574,9 +714,23 @@ class Exp3SensitivityExperimentV2(BaseExperiment):
                 importance_score = baseline_accuracy - ablated_accuracy
                 importance_scores[layer_idx] = importance_score
                 
+                # Save individual result immediately for checkpoint resumption
                 if not self.is_distributed or self.rank == 0:
+                    result_file = results_dir / f"sensitivity_block_{layer_idx}.json"
+                    result_data = {
+                        "block_idx": layer_idx,
+                        "baseline_accuracy": float(baseline_accuracy),
+                        "ablated_accuracy": float(ablated_accuracy),
+                        "importance_score": float(importance_score),
+                        "num_samples": num_samples,
+                        "dataset_name": dataset_name,
+                        "split": split,
+                    }
+                    with open(result_file, 'w') as f:
+                        json.dump(result_data, f, indent=2)
+                    
                     log.info(f"Layer {layer_idx}: Accuracy={ablated_accuracy:.4f}, "
-                            f"ΔAcc={importance_score:.4f}")
+                            f"ΔAcc={importance_score:.4f} (saved to {result_file})")
         
         finally:
             if mask_wrapper is not None:
@@ -623,9 +777,9 @@ class Exp3SensitivityExperimentV2(BaseExperiment):
         from molmo.data.data_formatter import DataFormatter
         from molmo.data.collator import MMCollator
         from molmo.data.dataset import DeterministicDataset
+        from torch.utils.data import ConcatDataset
         
-        dataset = get_dataset_by_name(dataset_name, split=split)
-        
+        # Prepare preprocessor first (needed for both single and combined splits)
         mm_preprocessor = MultiModalPreprocessor(
             tokenizer=self.tokenizer,
             crop_mode=self.model.config.crop_mode,
@@ -647,7 +801,32 @@ class Exp3SensitivityExperimentV2(BaseExperiment):
             for_inference=True,
         )
         
-        det_dataset = DeterministicDataset(dataset, preprocessor, seed=42)
+        # Support combining multiple splits (e.g., "train+validation")
+        # IMPORTANT: Apply DeterministicDataset to each split BEFORE concatenating
+        # because ConcatDataset doesn't have the 'get' method that DeterministicDataset expects
+        if "+" in split:
+            splits = [s.strip() for s in split.split("+")]
+            det_datasets = []
+            for s in splits:
+                try:
+                    ds = get_dataset_by_name(dataset_name, split=s)
+                    # Apply DeterministicDataset to each split before concatenating
+                    det_ds = DeterministicDataset(ds, preprocessor, seed=42)
+                    det_datasets.append(det_ds)
+                    if not self.is_distributed or self.rank == 0:
+                        log.info(f"Loaded {dataset_name} {s} split: {len(ds)} samples")
+                except Exception as e:
+                    if not self.is_distributed or self.rank == 0:
+                        log.warning(f"Failed to load {dataset_name} {s} split: {e}, skipping")
+            if not det_datasets:
+                raise ValueError(f"Failed to load any split for {dataset_name}")
+            det_dataset = ConcatDataset(det_datasets) if len(det_datasets) > 1 else det_datasets[0]
+            if not self.is_distributed or self.rank == 0:
+                total_samples = sum(len(ds) for ds in det_datasets) if len(det_datasets) > 1 else len(det_datasets[0])
+                log.info(f"Combined dataset: {total_samples} total samples from {len(det_datasets)} split(s)")
+        else:
+            dataset = get_dataset_by_name(dataset_name, split=split)
+            det_dataset = DeterministicDataset(dataset, preprocessor, seed=42)
         
         if self.is_distributed:
             sampler = DistributedSampler(
@@ -711,6 +890,7 @@ class Exp3SensitivityExperimentV2(BaseExperiment):
                 
                 # Generate candidates from current beam
                 candidates = []
+                seen_in_this_step = set()  # Track candidates in current step to avoid duplicates
                 
                 for state in beam:
                     # For this state, try removing each remaining explorable block
@@ -729,10 +909,21 @@ class Exp3SensitivityExperimentV2(BaseExperiment):
                         if len(new_active) < min_blocks:
                             continue
                         
-                        # Skip if already evaluated
+                        # Skip if already evaluated in previous steps
                         state_key = tuple(sorted(new_active))
                         if state_key in evaluated_states:
                             continue
+                        
+                        # Skip if already seen in this step (duplicate from different paths)
+                        # This handles the case where removing block 4 then 8 vs removing block 8 then 4
+                        # results in the same active_blocks configuration
+                        if state_key in seen_in_this_step:
+                            if not self.is_distributed or self.rank == 0:
+                                log.debug(f"Skipping duplicate candidate: active_blocks={new_active} "
+                                        f"(already in candidates for this step)")
+                            continue
+                        
+                        seen_in_this_step.add(state_key)
                         
                         # Check if we've already evaluated this state
                         candidate_state = BeamState(
@@ -747,90 +938,259 @@ class Exp3SensitivityExperimentV2(BaseExperiment):
                 
                 # Evaluate all candidates
                 evaluated_candidates = []
+                results_dir = Path(self.output_dir)
+                results_dir.mkdir(parents=True, exist_ok=True)
                 
                 for candidate_state, block_to_remove in candidates:
                     num_active = len(candidate_state.active_blocks)
-                    
-                    # Create mask
-                    block_mask = torch.zeros(total_blocks, dtype=torch.bool)
-                    for idx in candidate_state.active_blocks:
-                        block_mask[idx] = True
-                    
-                    # Apply mask
-                    if mask_wrapper is not None:
-                        mask_wrapper.remove()
-                    
-                    mask_wrapper = BlockMaskWrapper(self.model.model, block_mask)
-                    mask_wrapper.apply()
-                    
-                    # Find optimal batch size
-                    if auto_adjust_batch_size:
-                        mask_wrapper.remove()
-                        try:
-                            optimal_batch_size = self._find_optimal_batch_size(
-                                num_active_blocks=num_active,
-                                total_blocks=total_blocks,
-                                initial_batch_size=batch_size,
-                                dataloader_factory=create_dataloader,
-                            )
-                            current_batch_size = optimal_batch_size
-                        finally:
-                            mask_wrapper.apply()
-                        dataloader = create_dataloader(current_batch_size)
-                    else:
-                        current_batch_size = batch_size
-                        dataloader = create_dataloader(current_batch_size)
-                    
-                    # Compute accuracy
-                    accuracy, per_sample_scores = self._compute_accuracy_on_subset(
-                        dataloader,
-                        max_samples=num_samples,
-                        max_new_tokens=max_new_tokens,
-                        metric_name=metric_name,
-                        mask_applied=True,
-                    )
-                    
-                    accuracy_drop = baseline_accuracy - accuracy
-                    candidate_state.accuracy = accuracy
-                    candidate_state.accuracy_drop = accuracy_drop
-                    
-                    # Mark as evaluated
                     state_key = tuple(sorted(candidate_state.active_blocks))
-                    evaluated_states.add(state_key)
                     
-                    evaluated_candidates.append(candidate_state)
+                    # Check if this configuration already exists
+                    removed_str = '-'.join(map(str, sorted(candidate_state.removed_blocks)))
+                    config_filename = f"beam_search_step{step+1}_blocks{num_active}_removed{removed_str}.json"
+                    config_file = results_dir / config_filename
                     
-                    # Save result
-                    result_entry = {
-                        "step": step + 1,
-                        "num_active_blocks": num_active,
-                        "num_total_blocks": total_blocks,
-                        "active_block_indices": sorted(candidate_state.active_blocks),
-                        "removed_block_indices": sorted(candidate_state.removed_blocks),
-                        "accuracy": float(accuracy),
-                        "accuracy_drop": float(accuracy_drop),
-                        "num_samples": len(per_sample_scores),
-                        "std": float(np.std([s["score"] for s in per_sample_scores])) if per_sample_scores else 0.0,
-                    }
-                    all_results.append(result_entry)
+                    if config_file.exists():
+                        try:
+                            with open(config_file, 'r') as f:
+                                existing_result = json.load(f)
+                            candidate_state.accuracy = existing_result.get("accuracy", 0.0)
+                            candidate_state.accuracy_drop = existing_result.get("accuracy_drop", 0.0)
+                            evaluated_states.add(state_key)
+                            evaluated_candidates.append(candidate_state)
+                            
+                            if not self.is_distributed or self.rank == 0:
+                                log.info(f"✓ Loaded existing result for {sorted(candidate_state.removed_blocks)}: "
+                                        f"Accuracy={candidate_state.accuracy:.4f}, Drop={candidate_state.accuracy_drop:.4f}")
+                            continue
+                        except Exception as e:
+                            if not self.is_distributed or self.rank == 0:
+                                log.warning(f"Failed to load existing result for {sorted(candidate_state.removed_blocks)}: {e}, will recompute")
                     
-                    if not self.is_distributed or self.rank == 0:
-                        log.info(f"  Removed {sorted(candidate_state.removed_blocks)}: "
-                                f"Accuracy={accuracy:.4f}, Drop={accuracy_drop:.4f}")
+                    try:
+                        # Clean up previous mask wrapper and clear CUDA cache
+                        if mask_wrapper is not None:
+                            mask_wrapper.remove()
+                            mask_wrapper = None
+                        
+                        # Clear CUDA cache before creating new mask
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
+                            torch.cuda.synchronize()
+                        
+                        # Create mask
+                        block_mask = torch.zeros(total_blocks, dtype=torch.bool, device=self.device)
+                        for idx in candidate_state.active_blocks:
+                            block_mask[idx] = True
+                        
+                        # Apply mask
+                        mask_wrapper = BlockMaskWrapper(self.model.model, block_mask)
+                        mask_wrapper.apply()
+                        
+                        # Small delay to ensure mask is properly applied
+                        if torch.cuda.is_available():
+                            torch.cuda.synchronize()
+                        
+                        # Find optimal batch size
+                        if auto_adjust_batch_size:
+                            mask_wrapper.remove()
+                            try:
+                                optimal_batch_size = self._find_optimal_batch_size(
+                                    num_active_blocks=num_active,
+                                    total_blocks=total_blocks,
+                                    initial_batch_size=batch_size,
+                                    dataloader_factory=create_dataloader,
+                                )
+                                current_batch_size = optimal_batch_size
+                            finally:
+                                mask_wrapper.apply()
+                            dataloader = create_dataloader(current_batch_size)
+                        else:
+                            current_batch_size = batch_size
+                            dataloader = create_dataloader(current_batch_size)
+                        
+                        # Compute accuracy
+                        accuracy, per_sample_scores = self._compute_accuracy_on_subset(
+                            dataloader,
+                            max_samples=num_samples,
+                            max_new_tokens=max_new_tokens,
+                            metric_name=metric_name,
+                            mask_applied=True,
+                        )
+                        
+                        accuracy_drop = baseline_accuracy - accuracy
+                        candidate_state.accuracy = accuracy
+                        candidate_state.accuracy_drop = accuracy_drop
+                        
+                        # Mark as evaluated
+                        evaluated_states.add(state_key)
+                        
+                        evaluated_candidates.append(candidate_state)
+                        
+                        # Save result immediately for checkpoint resumption
+                        result_entry = {
+                            "step": step + 1,
+                            "num_active_blocks": num_active,
+                            "num_total_blocks": total_blocks,
+                            "active_block_indices": sorted(candidate_state.active_blocks),
+                            "removed_block_indices": sorted(candidate_state.removed_blocks),
+                            "accuracy": float(accuracy),
+                            "accuracy_drop": float(accuracy_drop),
+                            "num_samples": len(per_sample_scores),
+                            "std": float(np.std([s["score"] for s in per_sample_scores])) if per_sample_scores else 0.0,
+                            "baseline_accuracy": float(baseline_accuracy),
+                        }
+                        all_results.append(result_entry)
+                        
+                        # Save individual configuration result
+                        if not self.is_distributed or self.rank == 0:
+                            with open(config_file, 'w') as f:
+                                json.dump(result_entry, f, indent=2)
+                            
+                            log.info(f"  Removed {sorted(candidate_state.removed_blocks)}: "
+                                    f"Accuracy={accuracy:.4f}, Drop={accuracy_drop:.4f} (saved to {config_filename})")
+                        
+                        # Clean up mask wrapper immediately after each candidate
+                        if mask_wrapper is not None:
+                            try:
+                                mask_wrapper.remove()
+                            except Exception as cleanup_error:
+                                if not self.is_distributed or self.rank == 0:
+                                    log.warning(f"Error removing mask wrapper: {cleanup_error}")
+                            mask_wrapper = None
+                        
+                        # Clean up after each candidate to prevent memory buildup
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
+                            torch.cuda.synchronize()
+                        
+                        # Force garbage collection periodically to free Python objects
+                        import gc
+                        gc.collect()
+                        
+                        # Small delay to allow CUDA operations to complete
+                        time.sleep(0.05)
+                    
+                    except RuntimeError as e:
+                        # Handle CUDA errors specifically
+                        error_msg = str(e)
+                        is_cuda_error = "CUDA" in error_msg or "cuda" in error_msg.lower() or "unrecognized error code" in error_msg
+                        
+                        if not self.is_distributed or self.rank == 0:
+                            log.error(f"Error evaluating candidate {sorted(candidate_state.removed_blocks)}: {error_msg}")
+                            log.error(f"Error type: {type(e).__name__}")
+                            if is_cuda_error:
+                                log.error("This is a CUDA error - attempting recovery...")
+                        
+                        # Clean up on error - more aggressive cleanup
+                        if mask_wrapper is not None:
+                            try:
+                                mask_wrapper.remove()
+                            except Exception as cleanup_error:
+                                if not self.is_distributed or self.rank == 0:
+                                    log.warning(f"Error removing mask wrapper: {cleanup_error}")
+                            mask_wrapper = None
+                        
+                        # Aggressive memory cleanup on error
+                        if torch.cuda.is_available():
+                            try:
+                                torch.cuda.empty_cache()
+                                torch.cuda.synchronize()
+                                # Reset peak memory stats
+                                torch.cuda.reset_peak_memory_stats()
+                            except Exception as cuda_cleanup_error:
+                                if not self.is_distributed or self.rank == 0:
+                                    log.warning(f"Error during CUDA cleanup: {cuda_cleanup_error}")
+                        
+                        # Force garbage collection
+                        import gc
+                        gc.collect()
+                        
+                        # For CUDA errors, add a longer delay to allow recovery
+                        if is_cuda_error:
+                            time.sleep(0.5)
+                        
+                        # Skip this candidate
+                        continue
+                    except Exception as e:
+                        # Handle other errors
+                        error_msg = str(e)
+                        if not self.is_distributed or self.rank == 0:
+                            log.error(f"Error evaluating candidate {sorted(candidate_state.removed_blocks)}: {error_msg}")
+                            log.error(f"Error type: {type(e).__name__}")
+                        
+                        # Clean up on error
+                        if mask_wrapper is not None:
+                            try:
+                                mask_wrapper.remove()
+                            except:
+                                pass
+                            mask_wrapper = None
+                        
+                        # Memory cleanup
+                        if torch.cuda.is_available():
+                            try:
+                                torch.cuda.empty_cache()
+                                torch.cuda.synchronize()
+                            except:
+                                pass
+                        
+                        # Force garbage collection
+                        import gc
+                        gc.collect()
+                        
+                        # Skip this candidate
+                        continue
+                
+                # Remove duplicates before selecting top-K
+                # Use a dict to keep only the best (lowest accuracy_drop) for each unique active_blocks
+                unique_candidates = {}
+                for candidate in evaluated_candidates:
+                    state_key = tuple(sorted(candidate.active_blocks))
+                    if state_key not in unique_candidates:
+                        unique_candidates[state_key] = candidate
+                    else:
+                        # Keep the one with lower accuracy drop (better)
+                        if candidate.accuracy_drop < unique_candidates[state_key].accuracy_drop:
+                            unique_candidates[state_key] = candidate
+                
+                # Convert back to list and sort
+                unique_candidates_list = list(unique_candidates.values())
+                unique_candidates_list.sort(key=lambda s: s.accuracy_drop)  # Lower drop = better
                 
                 # Select top-K candidates (lowest accuracy drop = best)
-                evaluated_candidates.sort(key=lambda s: s.accuracy_drop)  # Lower drop = better
-                beam = evaluated_candidates[:beam_width]
+                beam = unique_candidates_list[:beam_width]
                 
                 if not self.is_distributed or self.rank == 0:
+                    num_duplicates = len(evaluated_candidates) - len(unique_candidates_list)
+                    if num_duplicates > 0:
+                        log.info(f"Removed {num_duplicates} duplicate configuration(s) before selecting top-{beam_width}")
                     log.info(f"Top {beam_width} candidates for next step:")
                     for i, state in enumerate(beam):
                         log.info(f"  {i+1}. Removed {sorted(state.removed_blocks)}: "
                                 f"Drop={state.accuracy_drop:.4f}")
+                
+                # Clean up mask wrapper between steps to prevent memory buildup
+                if mask_wrapper is not None:
+                    mask_wrapper.remove()
+                    mask_wrapper = None
+                
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                    torch.cuda.synchronize()
         
         finally:
+            # Final cleanup
             if mask_wrapper is not None:
-                mask_wrapper.remove()
+                try:
+                    mask_wrapper.remove()
+                except:
+                    pass
+                mask_wrapper = None
+            
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
         
         return all_results
     
@@ -899,9 +1259,9 @@ class Exp3SensitivityExperimentV2(BaseExperiment):
         from molmo.data.data_formatter import DataFormatter
         from molmo.data.collator import MMCollator
         from molmo.data.dataset import DeterministicDataset
+        from torch.utils.data import ConcatDataset
         
-        dataset = get_dataset_by_name(dataset_name, split=split)
-        
+        # Prepare preprocessor first (needed for both single and combined splits)
         mm_preprocessor = MultiModalPreprocessor(
             tokenizer=self.tokenizer,
             crop_mode=self.model.config.crop_mode,
@@ -923,7 +1283,32 @@ class Exp3SensitivityExperimentV2(BaseExperiment):
             for_inference=True,
         )
         
-        det_dataset = DeterministicDataset(dataset, preprocessor, seed=42)
+        # Support combining multiple splits (e.g., "train+validation")
+        # IMPORTANT: Apply DeterministicDataset to each split BEFORE concatenating
+        # because ConcatDataset doesn't have the 'get' method that DeterministicDataset expects
+        if "+" in split:
+            splits = [s.strip() for s in split.split("+")]
+            det_datasets = []
+            for s in splits:
+                try:
+                    ds = get_dataset_by_name(dataset_name, split=s)
+                    # Apply DeterministicDataset to each split before concatenating
+                    det_ds = DeterministicDataset(ds, preprocessor, seed=42)
+                    det_datasets.append(det_ds)
+                    if not self.is_distributed or self.rank == 0:
+                        log.info(f"Loaded {dataset_name} {s} split: {len(ds)} samples")
+                except Exception as e:
+                    if not self.is_distributed or self.rank == 0:
+                        log.warning(f"Failed to load {dataset_name} {s} split: {e}, skipping")
+            if not det_datasets:
+                raise ValueError(f"Failed to load any split for {dataset_name}")
+            det_dataset = ConcatDataset(det_datasets) if len(det_datasets) > 1 else det_datasets[0]
+            if not self.is_distributed or self.rank == 0:
+                total_samples = sum(len(ds) for ds in det_datasets) if len(det_datasets) > 1 else len(det_datasets[0])
+                log.info(f"Combined dataset: {total_samples} total samples from {len(det_datasets)} split(s)")
+        else:
+            dataset = get_dataset_by_name(dataset_name, split=split)
+            det_dataset = DeterministicDataset(dataset, preprocessor, seed=42)
         
         if self.is_distributed:
             sampler = DistributedSampler(
@@ -1073,7 +1458,7 @@ def main():
     parser.add_argument("--output_dir", type=str, default="./results/profiling/exp3_accuracy_sensitivity_v2")
     parser.add_argument("--dataset_name", type=str, default="coco_2014_vqa")
     parser.add_argument("--split", type=str, default="train",
-                       help="Dataset split to use (default: train for sensitivity analysis)")
+                       help="Dataset split to use (default: train). Can combine splits with '+', e.g., 'train+validation'")
     parser.add_argument("--batch_size", type=int, default=16, help="Initial batch size (will be optimized, default: 16, lower if OOM)")
     parser.add_argument("--max_new_tokens", type=int, default=16)
     def parse_num_samples(value):

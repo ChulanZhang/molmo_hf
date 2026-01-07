@@ -16,7 +16,7 @@ import logging
 import os
 import sys
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 import subprocess
 
 import numpy as np
@@ -33,6 +33,45 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 
+def check_sensitivity_results_exist(
+    output_dir: str,
+    split: str,
+    dataset_name: str,
+) -> Optional[Dict[int, float]]:
+    """Check if sensitivity analysis results already exist.
+    
+    Returns:
+        Dict[int, float] if results exist and are valid, None otherwise
+    """
+    import json
+    from pathlib import Path
+    
+    split_output_dir = Path(output_dir) / dataset_name / split
+    results_file = split_output_dir / "layer_importance_scores.json"
+    
+    if not results_file.exists():
+        return None
+    
+    try:
+        with open(results_file, 'r') as f:
+            results = json.load(f)
+        
+        # Convert string keys to int
+        importance_scores = {int(k): float(v) for k, v in results.items()}
+        
+        # Validate: should have 16 blocks
+        if len(importance_scores) != 16:
+            log.warning(f"Results file exists but has {len(importance_scores)} blocks (expected 16)")
+            return None
+        
+        log.info(f"✅ Found existing sensitivity results for {dataset_name} ({split}): {results_file}")
+        return importance_scores
+        
+    except Exception as e:
+        log.warning(f"Failed to load existing results from {results_file}: {e}")
+        return None
+
+
 def run_sensitivity_analysis(
     dataset_name: str,
     split: str,
@@ -42,14 +81,28 @@ def run_sensitivity_analysis(
     batch_size: int = 16,  # Lower default batch size to avoid OOM
     num_samples: int = None,
     max_new_tokens: int = 16,
+    skip_if_exists: bool = True,
 ) -> Dict[int, float]:
-    """Run sensitivity analysis and return importance scores."""
+    """Run sensitivity analysis and return importance scores.
     
-    log.info(f"Running sensitivity analysis on {dataset_name} ({split} split)...")
+    Args:
+        skip_if_exists: If True, skip if results already exist
     
+    Returns:
+        Dict[int, float]: Importance scores for each block
+    """
     # Create split-specific output directory
     split_output_dir = os.path.join(output_dir, dataset_name, split)
     os.makedirs(split_output_dir, exist_ok=True)
+    
+    # Check if results already exist
+    if skip_if_exists:
+        existing_results = check_sensitivity_results_exist(output_dir, split, dataset_name)
+        if existing_results is not None:
+            log.info(f"⏭️  Skipping sensitivity analysis for {dataset_name} ({split}): Results already exist")
+            return existing_results
+    
+    log.info(f"Running sensitivity analysis on {dataset_name} ({split} split)...")
     
     # Build command
     cmd = [
@@ -308,6 +361,15 @@ def visualize_importance_comparison(
     plt.close()
 
 
+# Mapping for datasets that don't have standard train/validation splits
+# Format: {dataset_name: {"train": alternative_split, "validation": validation_split}}
+DATASET_SPLIT_MAPPING = {
+    "mmmu": {"train": "dev", "validation": "validation"},
+    "tally_qa": {"train": "train", "validation": "test"},  # tally_qa only has train and test splits
+    # Add other datasets here if needed
+}
+
+
 def compare_importance_scores(
     dataset_name: str,
     model_path: str,
@@ -323,12 +385,21 @@ def compare_importance_scores(
     log.info(f"Comparing importance scores: {dataset_name}")
     log.info("=" * 80)
     
-    # Run sensitivity analysis on train set
+    # Determine which splits to use
+    if dataset_name in DATASET_SPLIT_MAPPING:
+        train_split = DATASET_SPLIT_MAPPING[dataset_name]["train"]
+        val_split = DATASET_SPLIT_MAPPING[dataset_name]["validation"]
+        log.info(f"Using custom splits for {dataset_name}: train={train_split}, validation={val_split}")
+    else:
+        train_split = "train"
+        val_split = "validation"
+    
+    # Run sensitivity analysis on train set (or equivalent)
     scores_train = None
     try:
         scores_train = run_sensitivity_analysis(
             dataset_name=dataset_name,
-            split="train",
+            split=train_split,
             model_path=model_path,
             output_dir=output_dir,
             num_gpus=num_gpus,
@@ -336,33 +407,46 @@ def compare_importance_scores(
             num_samples=num_samples,
             max_new_tokens=max_new_tokens,
         )
-        log.info(f"✅ Successfully computed importance scores on train set")
+        log.info(f"✅ Successfully computed importance scores on {train_split} set")
     except Exception as e:
         error_msg = str(e)
+        # Check if it's a split availability issue
+        if "Unknown split" in error_msg or "ValueError" in error_msg:
+            log.warning(f"⚠️  {train_split} split not available for {dataset_name}")
+            log.warning(f"   Error: {error_msg[:200]}...")
+            log.warning(f"   This dataset may not have a {train_split} split.")
+            log.warning(f"   Will try to use validation set instead.")
         # Check if it's a data availability issue (missing train images)
-        if "FileNotFoundError" in error_msg or "train2014" in error_msg or "No such file" in error_msg:
-            log.warning(f"⚠️  Train set images not available for {dataset_name}")
+        elif "FileNotFoundError" in error_msg or "train2014" in error_msg or "No such file" in error_msg:
+            log.warning(f"⚠️  {train_split} set images not available for {dataset_name}")
             log.warning(f"   Error: {error_msg[:200]}...")
             log.warning(f"   This is likely because train2014 images are not downloaded.")
             log.warning(f"   Will use validation set instead.")
         else:
-            log.error(f"Failed to run sensitivity analysis on train set: {e}")
+            log.error(f"Failed to run sensitivity analysis on {train_split} set: {e}")
             raise
     
     # Run sensitivity analysis on validation set
     try:
         scores_val = run_sensitivity_analysis(
             dataset_name=dataset_name,
-            split="validation",
+            split=val_split,
             model_path=model_path,
             output_dir=output_dir,
             num_gpus=num_gpus,
             batch_size=batch_size,
             num_samples=num_samples,
             max_new_tokens=max_new_tokens,
+            skip_if_exists=True,  # Skip if results already exist
         )
+        log.info(f"✅ Successfully computed importance scores on {val_split} set")
     except Exception as e:
-        log.error(f"Failed to run sensitivity analysis on validation set: {e}")
+        error_msg = str(e)
+        if "Unknown split" in error_msg or "ValueError" in error_msg:
+            log.warning(f"⚠️  {val_split} split not available for {dataset_name}")
+            log.warning(f"   Error: {error_msg[:200]}...")
+        else:
+            log.error(f"Failed to run sensitivity analysis on {val_split} set: {e}")
         scores_val = None
     
     if scores_train is None and scores_val is None:
@@ -371,16 +455,23 @@ def compare_importance_scores(
     # If train set is not available, we can only use validation set
     if scores_train is None:
         log.warning("=" * 80)
-        log.warning("⚠️  Train set not available - cannot compare train vs validation")
+        log.warning(f"⚠️  {train_split} set not available - cannot compare {train_split} vs {val_split}")
         log.warning("=" * 80)
-        log.warning(f"Train set images are missing for {dataset_name}.")
-        log.warning(f"This is likely because train2014 images are not downloaded.")
+        if dataset_name in DATASET_SPLIT_MAPPING:
+            log.warning(f"Dataset {dataset_name} uses custom splits: {DATASET_SPLIT_MAPPING[dataset_name]}")
+            log.warning(f"The {train_split} split is not available for this dataset.")
+        else:
+            log.warning(f"{train_split.capitalize()} set images are missing for {dataset_name}.")
+            log.warning(f"This is likely because train2014 images are not downloaded.")
         log.warning(f"")
         log.warning(f"Options:")
-        log.warning(f"1. Download train2014 images and re-run")
-        log.warning(f"2. Use validation set for sensitivity analysis (acceptable)")
+        if dataset_name not in DATASET_SPLIT_MAPPING:
+            log.warning(f"1. Download train2014 images and re-run")
+            log.warning(f"2. Use validation set for sensitivity analysis (acceptable)")
+        else:
+            log.warning(f"1. Use {val_split} set for sensitivity analysis (acceptable)")
         log.warning(f"")
-        log.warning(f"Since train set is not available, we'll use validation set scores only.")
+        log.warning(f"Since {train_split} set is not available, we'll use {val_split} set scores only.")
         log.warning(f"Note: This means we cannot verify consistency between splits.")
         log.warning("=" * 80)
         
@@ -389,7 +480,9 @@ def compare_importance_scores(
             "dataset_name": dataset_name,
             "train_available": False,
             "validation_available": True,
-            "note": "Train set images not available, using validation set only",
+            "train_split": train_split,
+            "validation_split": val_split,
+            "note": f"{train_split.capitalize()} set not available, using {val_split} set only",
             "validation_scores": {str(k): v for k, v in scores_val.items()},
             "block_ranking_val": sorted(scores_val.items(), key=lambda x: x[1]),
         }
@@ -417,6 +510,8 @@ def compare_importance_scores(
     
     comparison_result = {
         "dataset_name": dataset_name,
+        "train_split": train_split,
+        "validation_split": val_split,
         "num_common_blocks": len(common_blocks),
         "spearman_correlation": correlation,
         "p_value": p_value,
