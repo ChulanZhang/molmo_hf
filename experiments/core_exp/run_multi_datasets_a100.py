@@ -210,7 +210,18 @@ def main():
     base_output_dir = "./results/core_exp_a100"
     
     # Importance scores file (for block selection)
-    importance_scores_file = "./results/layer_importance_scores.json"
+    # Using EXP3 recommended scores to ensure correct block removal order:
+    # - num_active_blocks = 15 → Remove Block 4 (3.09% drop)
+    # - num_active_blocks = 14 → Remove Block 4, 13 (5.41% drop)
+    # - num_active_blocks = 13 → Remove Block 4, 10, 13 (7.53% drop)
+    # - num_active_blocks = 12 → Remove Block 2, 4, 10, 13 (18.36% drop)
+    importance_scores_file = "./results/layer_importance_scores_exp3_recommended.json"
+    if not Path(importance_scores_file).exists():
+        # Fallback to multi-dataset merged scores
+        importance_scores_file = "./results/layer_importance_scores_multi_dataset_simple.json"
+        if not Path(importance_scores_file).exists():
+            # Fallback to single-dataset scores
+            importance_scores_file = "./results/layer_importance_scores.json"
     
     # Sampling configuration (reduced for A100 memory constraints)
     num_samples = 1000
@@ -220,6 +231,11 @@ def main():
     # Tier-based vision token control (A100 defaults: more tiers for comprehensive profiling)
     tier_list = ["low", "medium", "high"]  # Available: "low", "medium", "high"
     top_k_list = [4, 6, 8]  # MoE top-k values
+    # Number of active transformer blocks (EXP3 recommended configurations)
+    # 12 blocks: Remove Block 2, 4, 10, 13 (18.36% accuracy drop)
+    # 14 blocks: Remove Block 4, 13 (5.41% accuracy drop) - RECOMMENDED
+    # 15 blocks: Remove Block 4 (3.09% accuracy drop)
+    # 16 blocks: No removal (baseline)
     num_active_blocks_list = [12, 14, 16]  # Number of active transformer blocks
     
     # Memory optimization (enabled by default for A100)
