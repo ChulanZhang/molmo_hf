@@ -1273,9 +1273,22 @@ class CombinedProfilingExperiment(BaseExperiment):
                                 "T_LLM_decode": latency_results.get("T_LLM_decode", 0.0),
                                 "T_total": latency_results.get("T_total", 0.0),
                                 # Decode per token (average per decode step)
-                                # Note: EOS token also requires a forward pass, so we use num_output_tokens
-                                # which includes EOS. This accurately reflects per-step decode latency.
-                                "T_decode_per_token": latency_results.get("T_LLM_decode", 0.0) / max(num_output_tokens, 1),
+                                # Calculate from T_decode_per_step if available (more accurate)
+                                # Otherwise fallback to T_LLM_decode / output_tokens
+                                decode_per_step = latency_results.get("T_decode_per_step", [])
+                                if decode_per_step:
+                                    # Calculate average per-step latency from positioned data
+                                    # decode_per_step is [position][run], we need average across all positions and runs
+                                    all_step_times = []
+                                    for pos_times in decode_per_step:
+                                        all_step_times.extend(pos_times)
+                                    if all_step_times:
+                                        T_decode_per_token_from_steps = float(np.mean(all_step_times))
+                                    else:
+                                        T_decode_per_token_from_steps = latency_results.get("T_LLM_decode", 0.0) / max(num_output_tokens, 1)
+                                else:
+                                    T_decode_per_token_from_steps = latency_results.get("T_LLM_decode", 0.0) / max(num_output_tokens, 1)
+                                "T_decode_per_token": T_decode_per_token_from_steps,
                                 # Positioned decode latency (per-step latency for each position)
                                 # Format: [position][run] - e.g., [[8.5, 8.3], [9.2, 9.0], ...] for 2 runs
                                 # Statistics are computed at aggregate level in _merge_config_results()
