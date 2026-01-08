@@ -1270,8 +1270,9 @@ class CombinedProfilingExperiment(BaseExperiment):
                                 # Decode per token (average, for backward compatibility)
                                 "T_decode_per_token": latency_results.get("T_LLM_decode", 0.0) / max(num_output_tokens, 1),
                                 # Positioned decode latency (per-step latency for each position)
+                                # Format: [position][run] - e.g., [[8.5, 8.3], [9.2, 9.0], ...] for 2 runs
+                                # Statistics are computed at aggregate level in _merge_config_results()
                                 "T_decode_per_step": latency_results.get("T_decode_per_step", []),  # List of lists: [position][run]
-                                "T_decode_per_step_stats": latency_results.get("T_decode_per_step_stats", {}),  # Stats per position
                                 }
                             
                             per_sample_results.append(sample_result)

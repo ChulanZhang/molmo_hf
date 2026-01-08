@@ -702,20 +702,8 @@ class BaseExperiment(ABC):
                     positioned_decode_times.append(step_times)
             
             # Store as list of lists: [position][run]
+            # Note: Statistics are computed at aggregate level (across all samples), not per-sample
             results["T_decode_per_step"] = positioned_decode_times
-            
-            # Also compute statistics per position
-            decode_per_step_stats = {}
-            for pos_idx, step_times in enumerate(positioned_decode_times):
-                if step_times:
-                    decode_per_step_stats[f"pos_{pos_idx}"] = {
-                        "mean": float(np.mean(step_times)),
-                        "std": float(np.std(step_times)),
-                        "p50": float(np.percentile(step_times, 50)),
-                        "p95": float(np.percentile(step_times, 95)),
-                        "p99": float(np.percentile(step_times, 99)),
-                    }
-            results["T_decode_per_step_stats"] = decode_per_step_stats
         
         return output if num_runs > 0 else None
     
