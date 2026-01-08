@@ -1232,6 +1232,8 @@ class CombinedProfilingExperiment(BaseExperiment):
                             actual_text_tokens = latency_results.get("actual_text_tokens", 0)
                             total_sequence_length = latency_results.get("total_sequence_length", 0)
                             num_output_tokens = latency_results.get("num_output_tokens", 0)
+                            num_content_tokens = latency_results.get("num_content_tokens", num_output_tokens)  # Excludes EOS if present
+                            ends_with_eos = latency_results.get("ends_with_eos", False)
                             
                             # Store per-sample result
                             # Extract prediction and groundtruth from batch_accuracy
@@ -1248,7 +1250,9 @@ class CombinedProfilingExperiment(BaseExperiment):
                                 "tier_range": {"min_crops": tier["min_crops"], "max_crops": tier["max_crops"]},
                                 "top_k": top_k,
                                 "num_active_blocks": num_active_blocks,
-                                "output_tokens": num_output_tokens,
+                                "output_tokens": num_output_tokens,  # Total output tokens (includes EOS if present)
+                                "content_tokens": num_content_tokens,  # Content tokens (excludes EOS)
+                                "ends_with_eos": ends_with_eos,
                                 # Image information (directly from metadata, no inference needed)
                                 "actual_image_size": actual_image_size,
                                 "actual_num_crops": actual_num_crops,
@@ -1267,8 +1271,9 @@ class CombinedProfilingExperiment(BaseExperiment):
                                 "T_LLM_prefill": latency_results.get("T_LLM_prefill", 0.0),
                                 "T_LLM_decode": latency_results.get("T_LLM_decode", 0.0),
                                 "T_total": latency_results.get("T_total", 0.0),
-                                # Decode per token (average, for backward compatibility)
-                                "T_decode_per_token": latency_results.get("T_LLM_decode", 0.0) / max(num_output_tokens, 1),
+                                # Decode per token (average, excludes EOS token for accurate per-content-token latency)
+                                # Use num_content_tokens instead of num_output_tokens to exclude EOS
+                                "T_decode_per_token": latency_results.get("T_LLM_decode", 0.0) / max(num_content_tokens, 1),
                                 # Positioned decode latency (per-step latency for each position)
                                 # Format: [position][run] - e.g., [[8.5, 8.3], [9.2, 9.0], ...] for 2 runs
                                 # Statistics are computed at aggregate level in _merge_config_results()

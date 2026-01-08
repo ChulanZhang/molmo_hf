@@ -445,16 +445,50 @@ class BaseExperiment(ABC):
         results["total_sequence_length"] = total_sequence_length
         
         # Determine output tokens
+        # Check if output ends with EOS token to exclude it from content token count
+        num_output_tokens = 0
+        num_content_tokens = 0  # Excludes EOS token if present
+        ends_with_eos = False
+        
         if output is not None:
             if hasattr(output, "logits"):
-                 results["num_output_tokens"] = 1
+                num_output_tokens = 1
+                num_content_tokens = 1
             else:
-                 if output.shape[1] > input_ids.shape[1]:
-                     results["num_output_tokens"] = int(output.shape[1] - input_ids.shape[1])
-                 else:
-                     results["num_output_tokens"] = int(output.shape[1])
-        else:
-            results["num_output_tokens"] = 0
+                if output.shape[1] > input_ids.shape[1]:
+                    num_output_tokens = int(output.shape[1] - input_ids.shape[1])
+                else:
+                    num_output_tokens = int(output.shape[1])
+                
+                # Check if output ends with EOS token (only if use_eos_token is True)
+                if num_output_tokens > 0 and use_eos_token:
+                    eos_token_id = self.tokenizer.eos_token_id
+                    if eos_token_id is None:
+                        eos_token_id = getattr(self.model.config, 'eos_token_id', None)
+                    
+                    if eos_token_id is not None:
+                        # Check if the last generated token is EOS
+                        # output is [batch_size, seq_len], we need the last token of the generated part
+                        generated_part = output[:, input_ids.shape[1]:]
+                        if generated_part.shape[1] > 0:
+                            last_token = generated_part[0, -1].item()  # Get last token of first sequence
+                            if last_token == eos_token_id:
+                                ends_with_eos = True
+                                num_content_tokens = max(0, num_output_tokens - 1)  # Exclude EOS, but ensure >= 0
+                            else:
+                                num_content_tokens = num_output_tokens
+                        else:
+                            num_content_tokens = num_output_tokens
+                    else:
+                        # EOS token ID not available, assume no EOS
+                        num_content_tokens = num_output_tokens
+                else:
+                    # EOS not enabled or num_output_tokens is 0
+                    num_content_tokens = num_output_tokens
+        
+        results["num_output_tokens"] = num_output_tokens
+        results["num_content_tokens"] = num_content_tokens  # Excludes EOS if present
+        results["ends_with_eos"] = ends_with_eos
         
         # Store output if requested
         if return_output and output is not None:
