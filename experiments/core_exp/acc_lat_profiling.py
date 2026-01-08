@@ -379,15 +379,22 @@ def _merge_config_results(gathered_configs: List[Dict], template_config: Dict) -
             latency_stats[f"{key}_p99"] = float(np.percentile(values, 99))
     
     # Compute positioned decode latency statistics (per position)
-    # Collect all per-step decode times by position
+    # Collect all per-step decode times by position, excluding EOS position
     positioned_decode_times = {}  # {position: [all_times_across_samples]}
     for sample in all_per_sample:
         decode_per_step = sample.get("T_decode_per_step", [])
+        ends_with_eos = sample.get("ends_with_eos", False)
+        content_tokens = sample.get("content_tokens", 0)
+        
         if decode_per_step:
             # decode_per_step is a list of lists: [position][run]
-            # For each position, collect all run times across all samples
+            # Exclude the last position if it's EOS (ends_with_eos=True)
+            # Only include positions up to content_tokens (excludes EOS position)
+            max_pos_to_include = content_tokens if ends_with_eos else len(decode_per_step)
+            
             for pos_idx, step_times in enumerate(decode_per_step):
-                if step_times:  # step_times is a list of run times for this position
+                # Only include positions that are content tokens (exclude EOS position)
+                if pos_idx < max_pos_to_include and step_times:
                     if pos_idx not in positioned_decode_times:
                         positioned_decode_times[pos_idx] = []
                     positioned_decode_times[pos_idx].extend(step_times)
