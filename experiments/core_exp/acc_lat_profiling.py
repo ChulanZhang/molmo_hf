@@ -378,6 +378,37 @@ def _merge_config_results(gathered_configs: List[Dict], template_config: Dict) -
             latency_stats[f"{key}_p95"] = float(np.percentile(values, 95))
             latency_stats[f"{key}_p99"] = float(np.percentile(values, 99))
     
+    # Compute positioned decode latency statistics (per position)
+    # Collect all per-step decode times by position
+    positioned_decode_times = {}  # {position: [all_times_across_samples]}
+    for sample in all_per_sample:
+        decode_per_step = sample.get("T_decode_per_step", [])
+        if decode_per_step:
+            # decode_per_step is a list of lists: [position][run]
+            # For each position, collect all run times across all samples
+            for pos_idx, step_times in enumerate(decode_per_step):
+                if step_times:  # step_times is a list of run times for this position
+                    if pos_idx not in positioned_decode_times:
+                        positioned_decode_times[pos_idx] = []
+                    positioned_decode_times[pos_idx].extend(step_times)
+    
+    # Compute statistics for each position
+    positioned_decode_stats = {}
+    for pos_idx in sorted(positioned_decode_times.keys()):
+        pos_times = positioned_decode_times[pos_idx]
+        if pos_times:
+            positioned_decode_stats[f"pos_{pos_idx}"] = {
+                "mean": float(np.mean(pos_times)),
+                "std": float(np.std(pos_times)),
+                "p50": float(np.percentile(pos_times, 50)),
+                "p95": float(np.percentile(pos_times, 95)),
+                "p99": float(np.percentile(pos_times, 99)),
+                "count": len(pos_times),  # Number of measurements at this position
+            }
+    
+    if positioned_decode_stats:
+        latency_stats["T_decode_per_step_stats"] = positioned_decode_stats
+    
     # Vision tokens statistics
     vision_token_values = [s["actual_vision_tokens"] for s in all_per_sample if "actual_vision_tokens" in s]
     vision_tokens_mean = float(np.mean(vision_token_values)) if vision_token_values else 0.0
@@ -1236,8 +1267,11 @@ class CombinedProfilingExperiment(BaseExperiment):
                                 "T_LLM_prefill": latency_results.get("T_LLM_prefill", 0.0),
                                 "T_LLM_decode": latency_results.get("T_LLM_decode", 0.0),
                                 "T_total": latency_results.get("T_total", 0.0),
-                                # Decode per token
+                                # Decode per token (average, for backward compatibility)
                                 "T_decode_per_token": latency_results.get("T_LLM_decode", 0.0) / max(num_output_tokens, 1),
+                                # Positioned decode latency (per-step latency for each position)
+                                "T_decode_per_step": latency_results.get("T_decode_per_step", []),  # List of lists: [position][run]
+                                "T_decode_per_step_stats": latency_results.get("T_decode_per_step_stats", {}),  # Stats per position
                                 }
                             
                             per_sample_results.append(sample_result)

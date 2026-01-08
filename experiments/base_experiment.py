@@ -504,12 +504,14 @@ class BaseExperiment(ABC):
         prefill_times = []
         total_times = []
         decode_times = []  # Store total decode time per run
+        decode_step_times_per_run = []  # Store per-step decode times for each run
         
         # Hook state
         vision_start_time = None
         prefill_start_time = None
         forward_count = 0  # Track prefill (0) vs decode (>0)
         decode_start_time = None  # Start time of decode phase (first decode step)
+        decode_step_times = []  # Store latency for each decode step in current run
         
         # Vision hook (only for prefill step)
         vision_hook_handle = None
@@ -560,7 +562,7 @@ class BaseExperiment(ABC):
         original_forward = self.model.model.forward
         
         def tracked_forward(*args, **kwargs):
-            nonlocal forward_count, vision_start_time, decode_start_time
+            nonlocal forward_count, vision_start_time, decode_start_time, decode_step_times
             is_prefill = forward_count == 0
             
             # Record vision start time (before forward, only in prefill step)
@@ -575,8 +577,24 @@ class BaseExperiment(ABC):
                     torch.cuda.synchronize(self.device)
                 decode_start_time = time.perf_counter()
             
+            # Measure each decode step individually
+            decode_step_start = None
+            if not is_prefill:
+                # This is a decode step - measure its latency
+                if self.device.type == 'cuda':
+                    torch.cuda.synchronize(self.device)
+                decode_step_start = time.perf_counter()
+            
             # Call original forward
             output = original_forward(*args, **kwargs)
+            
+            # Record decode step end time and compute latency
+            if not is_prefill and decode_step_start is not None:
+                if self.device.type == 'cuda':
+                    torch.cuda.synchronize(self.device)
+                decode_step_end = time.perf_counter()
+                decode_step_latency = (decode_step_end - decode_step_start) * 1000  # Convert to ms
+                decode_step_times.append(decode_step_latency)
             
             # Increment forward count after prefill
             if is_prefill:
@@ -601,8 +619,10 @@ class BaseExperiment(ABC):
             prefill_times.clear()
             decode_times.clear()
             total_times.clear()
+            decode_step_times_per_run.clear()
             forward_count = 0
             decode_start_time = None
+            decode_step_times = []
         
         # Actual measurements
         for run_idx in range(num_runs):
@@ -610,6 +630,7 @@ class BaseExperiment(ABC):
             vision_start_time = None
             prefill_start_time = None
             decode_start_time = None
+            decode_step_times = []  # Reset for each run
             
             self.model.model.forward = tracked_forward
             
@@ -638,6 +659,10 @@ class BaseExperiment(ABC):
                     torch.cuda.synchronize(self.device)
                 decode_end_time = time.perf_counter()
                 decode_times.append((decode_end_time - decode_start_time) * 1000)
+            
+            # Store per-step decode times for this run
+            if decode_step_times:
+                decode_step_times_per_run.append(decode_step_times.copy())
         
         # Restore original forward
         self.model.model.forward = original_forward
@@ -661,6 +686,36 @@ class BaseExperiment(ABC):
             results["T_LLM_decode"] = np.mean(decode_times)
         if total_times:
             results["T_total"] = np.mean(total_times)
+        
+        # Store positioned decode latency (per-step latency for each position)
+        if decode_step_times_per_run:
+            # Transpose: convert from [run][step] to [step][run]
+            # This allows us to compute statistics per position
+            max_steps = max(len(run_times) for run_times in decode_step_times_per_run)
+            positioned_decode_times = []
+            for step_idx in range(max_steps):
+                step_times = []
+                for run_times in decode_step_times_per_run:
+                    if step_idx < len(run_times):
+                        step_times.append(run_times[step_idx])
+                if step_times:
+                    positioned_decode_times.append(step_times)
+            
+            # Store as list of lists: [position][run]
+            results["T_decode_per_step"] = positioned_decode_times
+            
+            # Also compute statistics per position
+            decode_per_step_stats = {}
+            for pos_idx, step_times in enumerate(positioned_decode_times):
+                if step_times:
+                    decode_per_step_stats[f"pos_{pos_idx}"] = {
+                        "mean": float(np.mean(step_times)),
+                        "std": float(np.std(step_times)),
+                        "p50": float(np.percentile(step_times, 50)),
+                        "p95": float(np.percentile(step_times, 95)),
+                        "p99": float(np.percentile(step_times, 99)),
+                    }
+            results["T_decode_per_step_stats"] = decode_per_step_stats
         
         return output if num_runs > 0 else None
     
