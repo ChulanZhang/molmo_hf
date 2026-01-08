@@ -379,22 +379,16 @@ def _merge_config_results(gathered_configs: List[Dict], template_config: Dict) -
             latency_stats[f"{key}_p99"] = float(np.percentile(values, 99))
     
     # Compute positioned decode latency statistics (per position)
-    # Collect all per-step decode times by position, excluding EOS position
+    # Collect all per-step decode times by position
+    # Note: EOS token also requires a forward pass, so we include all positions
     positioned_decode_times = {}  # {position: [all_times_across_samples]}
     for sample in all_per_sample:
         decode_per_step = sample.get("T_decode_per_step", [])
-        ends_with_eos = sample.get("ends_with_eos", False)
-        content_tokens = sample.get("content_tokens", 0)
-        
         if decode_per_step:
             # decode_per_step is a list of lists: [position][run]
-            # Exclude the last position if it's EOS (ends_with_eos=True)
-            # Only include positions up to content_tokens (excludes EOS position)
-            max_pos_to_include = content_tokens if ends_with_eos else len(decode_per_step)
-            
+            # Include all positions (including EOS) since each requires a forward pass
             for pos_idx, step_times in enumerate(decode_per_step):
-                # Only include positions that are content tokens (exclude EOS position)
-                if pos_idx < max_pos_to_include and step_times:
+                if step_times:  # step_times is a list of run times for this position
                     if pos_idx not in positioned_decode_times:
                         positioned_decode_times[pos_idx] = []
                     positioned_decode_times[pos_idx].extend(step_times)
@@ -1278,9 +1272,10 @@ class CombinedProfilingExperiment(BaseExperiment):
                                 "T_LLM_prefill": latency_results.get("T_LLM_prefill", 0.0),
                                 "T_LLM_decode": latency_results.get("T_LLM_decode", 0.0),
                                 "T_total": latency_results.get("T_total", 0.0),
-                                # Decode per token (average, excludes EOS token for accurate per-content-token latency)
-                                # Use num_content_tokens instead of num_output_tokens to exclude EOS
-                                "T_decode_per_token": latency_results.get("T_LLM_decode", 0.0) / max(num_content_tokens, 1),
+                                # Decode per token (average per decode step)
+                                # Note: EOS token also requires a forward pass, so we use num_output_tokens
+                                # which includes EOS. This accurately reflects per-step decode latency.
+                                "T_decode_per_token": latency_results.get("T_LLM_decode", 0.0) / max(num_output_tokens, 1),
                                 # Positioned decode latency (per-step latency for each position)
                                 # Format: [position][run] - e.g., [[8.5, 8.3], [9.2, 9.0], ...] for 2 runs
                                 # Statistics are computed at aggregate level in _merge_config_results()
