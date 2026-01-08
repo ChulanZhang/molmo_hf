@@ -240,6 +240,7 @@ def main():
     
     # Dataset configurations
     # Format: (dataset_name, split, max_new_tokens)
+    # Note: MMMU excluded due to low train-val correlation (0.2558) and API rate limiting issues
     datasets = [
         ("coco_2014_vqa", "validation", 16),
         ("text_vqa", "validation", 64),
@@ -248,7 +249,7 @@ def main():
         ("st_qa", "validation", 32),
         ("doc_qa", "validation", 32),
         ("tally_qa", "test", 16),
-        ("mmmu", "validation", 16),
+        # ("mmmu", "validation", 16),  # Excluded: low correlation (0.2558) and API rate limiting
         ("coco_caption", "validation", 64),
     ]
     
