@@ -1240,6 +1240,23 @@ class CombinedProfilingExperiment(BaseExperiment):
                             # Extract prediction and groundtruth from batch_accuracy
                             pred_score = batch_accuracy["per_sample_scores"][0] if batch_accuracy["per_sample_scores"] else {}
                             # Note: metadata already contains question and answers, so we don't save them separately
+                            
+                            # Calculate T_decode_per_token from T_decode_per_step if available (more accurate)
+                            # Otherwise fallback to T_LLM_decode / output_tokens
+                            decode_per_step = latency_results.get("T_decode_per_step", [])
+                            if decode_per_step:
+                                # Calculate average per-step latency from positioned data
+                                # decode_per_step is [position][run], we need average across all positions and runs
+                                all_step_times = []
+                                for pos_times in decode_per_step:
+                                    all_step_times.extend(pos_times)
+                                if all_step_times:
+                                    T_decode_per_token_value = float(np.mean(all_step_times))
+                                else:
+                                    T_decode_per_token_value = latency_results.get("T_LLM_decode", 0.0) / max(num_output_tokens, 1)
+                            else:
+                                T_decode_per_token_value = latency_results.get("T_LLM_decode", 0.0) / max(num_output_tokens, 1)
+                            
                             # Store per-sample result
                             if tier_list:
                                 # Tier-based mode: record selected crops per image
@@ -1275,20 +1292,7 @@ class CombinedProfilingExperiment(BaseExperiment):
                                 # Decode per token (average per decode step)
                                 # Calculate from T_decode_per_step if available (more accurate)
                                 # Otherwise fallback to T_LLM_decode / output_tokens
-                                decode_per_step = latency_results.get("T_decode_per_step", [])
-                                if decode_per_step:
-                                    # Calculate average per-step latency from positioned data
-                                    # decode_per_step is [position][run], we need average across all positions and runs
-                                    all_step_times = []
-                                    for pos_times in decode_per_step:
-                                        all_step_times.extend(pos_times)
-                                    if all_step_times:
-                                        T_decode_per_token_from_steps = float(np.mean(all_step_times))
-                                    else:
-                                        T_decode_per_token_from_steps = latency_results.get("T_LLM_decode", 0.0) / max(num_output_tokens, 1)
-                                else:
-                                    T_decode_per_token_from_steps = latency_results.get("T_LLM_decode", 0.0) / max(num_output_tokens, 1)
-                                "T_decode_per_token": T_decode_per_token_from_steps,
+                                "T_decode_per_token": T_decode_per_token_value,
                                 # Positioned decode latency (per-step latency for each position)
                                 # Format: [position][run] - e.g., [[8.5, 8.3], [9.2, 9.0], ...] for 2 runs
                                 # Statistics are computed at aggregate level in _merge_config_results()
