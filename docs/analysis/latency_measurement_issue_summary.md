@@ -61,13 +61,26 @@ results["T_LLM_decode"] = max(0.0, T_total - T_vision_total - T_LLM_prefill)
 
 ## 🔍 问题根源
 
-### 1. Vision 被计算了多次
+### 1. 测量方法的问题
+
+当前代码使用**减法方法**计算 decode latency：
+
+```python
+results["T_LLM_decode"] = max(0.0, results["T_total"] - results.get("T_vision_total", 0.0) - results.get("T_LLM_prefill", 0.0))
+```
+
+### 2. 分别测量 vs 整体测量
+
+- `T_vision_total` 和 `T_LLM_prefill` 是**分别独立测量**的（在不同的 forward pass 中）
+- `T_total` 是在 `model.generate()` 中测量的，这是一个**完整的流程**（vision + prefill + decode 一起）
+
+### 3. Vision 被计算了多次
 
 - **测量 `T_vision_total`**: 单独调用 `vision_backbone()` (第1次)
 - **测量 `T_LLM_prefill`**: 调用 `model()`，内部调用 `vision_backbone()` (第2次)
 - **测量 `T_total`**: 调用 `model.generate()`，内部调用 `model.forward()` -> `vision_backbone()` (第3次)
 
-### 2. 测量环境不一致
+### 4. 测量环境不一致
 
 | 测量阶段 | `empty_cache()` | GPU 缓存状态 | 测量时间 |
 |---------|----------------|------------|---------|
@@ -75,14 +88,21 @@ results["T_LLM_decode"] = max(0.0, T_total - T_vision_total - T_LLM_prefill)
 | `T_LLM_prefill` | ❌ 无 | 受益于缓存 | 更快 |
 | `T_total` | ✅ **有** | 缓存被清空 | 较慢 |
 
-### 3. `torch.cuda.empty_cache()` 的影响
+### 5. 测量误差的来源
+
+1. **缓存效应**：分别测量时，第二次测量可能受益于 GPU 缓存
+2. **GPU 预热**：第一次测量可能包含 GPU 预热时间
+3. **时序问题**：分别测量时，`torch.cuda.synchronize()` 的时机可能不同
+4. **系统负载**：不同时间点的系统负载可能不同
+
+### 6. `torch.cuda.empty_cache()` 的影响
 
 **只在 `T_total` 测量前调用** (行 567)，导致：
 - Vision/Pre fill 测量时：可能有 GPU 缓存，测量较快
 - `T_total` 测量时：缓存被清空，内存分配更慢，测量较慢
 - 结果：`T_vision_total + T_LLM_prefill` 可能 **大于** `T_total`，导致 `T_LLM_decode` 为负数
 
-### 4. 为什么误差达到几十毫秒？
+### 7. 为什么误差达到几十毫秒？
 
 1. **GPU 缓存效应**:
    - 第一次测量 vision: 冷启动，~180ms
@@ -96,6 +116,13 @@ results["T_LLM_decode"] = max(0.0, T_total - T_vision_total - T_LLM_prefill)
 3. **CUDA kernel 调度**:
    - 不同的内存状态可能导致不同的 kernel 调度策略
    - `empty_cache()` 可能触发不同的优化路径
+
+### 8. 为什么 decode 时间短时更容易出现？
+
+- 当 decode 时间很短（1-2 tokens，约 20-50ms）时
+- 测量误差（约 20-30ms）可能超过实际的 decode 时间
+- 导致 `T_vision_total + T_LLM_prefill > T_total`
+- 从而 `T_LLM_decode` 计算为负数，被 `max(0.0, ...)` 截断为 0
 
 ## 📊 数据验证
 
@@ -144,26 +171,50 @@ if self.device.type == 'cuda':
 
 使用 hooks 在 `model.generate()` 内部直接测量 decode 阶段，而不是用减法。
 
-### 方案4：记录负值用于分析
+### 方案4：记录负值并警告（临时方案）
 
-不要简单地截断为 0，而是记录负值：
+不要简单地截断为 0，而是记录负值并发出警告：
 
 ```python
 calculated_decode = results["T_total"] - results.get("T_vision_total", 0.0) - results.get("T_LLM_prefill", 0.0)
 if calculated_decode < 0:
-    log.warning(f"Negative decode latency: {calculated_decode:.2f} ms")
+    log.warning(f"Negative decode latency calculated: {calculated_decode:.2f} ms. "
+                f"This indicates measurement error. Using 0.0.")
     results["T_LLM_decode"] = 0.0
-    results["T_LLM_decode_negative"] = calculated_decode  # 记录负值
+    results["T_LLM_decode_negative"] = calculated_decode  # 记录负值用于分析
 else:
     results["T_LLM_decode"] = calculated_decode
 ```
 
+### 方案5：使用 T_decode_per_token 反推
+
+如果 `output_tokens > 0` 但 `T_LLM_decode = 0`，可以使用 aggregate 的 `T_decode_per_token_mean` 来估算：
+
+```python
+if results["T_LLM_decode"] == 0.0 and output_tokens > 0:
+    # 使用 aggregate 的 per-token latency 来估算
+    decode_per_token = aggregate_stats.get("T_decode_per_token_mean", 0.0)
+    if decode_per_token > 0:
+        results["T_LLM_decode"] = decode_per_token * output_tokens
+```
+
+## 📉 影响
+
+1. **Latency 统计不准确**：22.85% 的样本 decode latency 被错误地设为 0
+2. **Per-token latency 计算错误**：`T_decode_per_token = T_LLM_decode / output_tokens` 会得到 0
+3. **Latency 模型训练数据有噪声**：这些样本的 decode latency 标签是错误的
+
 ## 🎯 建议
 
-**优先实施方案1**：统一测量环境，在所有测量前都调用 `empty_cache()`，确保测量条件一致。
+**优先实施方案1**（统一测量环境）或**方案3**（直接测量 decode 时间）：
 
-这样可以：
-- 消除缓存效应导致的测量误差
-- 确保所有测量在相同的 GPU 状态下进行
-- 虽然可能整体测量时间稍长，但数据更准确
+- **方案1**：统一测量环境，在所有测量前都调用 `empty_cache()`，确保测量条件一致
+  - 消除缓存效应导致的测量误差
+  - 确保所有测量在相同的 GPU 状态下进行
+  - 虽然可能整体测量时间稍长，但数据更准确
+
+- **方案3**：直接测量 decode 时间（最准确的解决方案）
+  - 使用 hooks 在 `model.generate()` 内部直接测量 decode 阶段
+  - 避免减法计算的累积误差
+  - 如果暂时无法修改 `model.generate()`，可以先实施**方案4**（记录负值并警告），以便识别和分析问题
 
