@@ -1,14 +1,22 @@
 # Controller Design Documentation
 
 > **Status**: Unified design documentation index  
-> **Last Updated**: 2026-01-01  
-> **Version**: 2.0
+> **Last Updated**: 2026-01-10  
+> **Version**: 3.0 (Joint Training Only)
 
 ## 📚 Documentation Navigation
 
+> **New to Controller Design?** Start with **[OVERVIEW.md](OVERVIEW.md)** for a comprehensive introduction!
+
 ### 🎯 Core Documents (Must Read)
 
-1. **[DESIGN.md](DESIGN.md)** - **Unified Design Document** ⭐
+1. **[OVERVIEW.md](OVERVIEW.md)** - **Quick Start Guide** ⭐⭐⭐
+   - Quick introduction to controller design
+   - Core architecture overview
+   - Key design decisions
+   - Quick start commands
+
+2. **[DESIGN.md](DESIGN.md)** - **Unified Design Document** ⭐⭐⭐
    - Complete design architecture
    - Detailed design of three knobs
    - Two-stage prediction architecture
@@ -17,14 +25,13 @@
    - Overhead analysis
    - Key design decisions
 
-2. **[ANALYSIS.md](ANALYSIS.md)** - **Technical Analysis Document** ⭐
-   - Feature extraction analysis
-   - Controller architecture analysis
-   - Training method analysis
-   - Latency estimator design
-   - Feasibility analysis
+3. **[TRAINING_GUIDE.md](TRAINING_GUIDE.md)** - **Training Guide** ⭐⭐
+   - Complete training workflow
+   - Step-by-step instructions
+   - Hyperparameter tuning
+   - Troubleshooting
 
-3. **[EXPERIMENTS.md](EXPERIMENTS.md)** - **Experiments Document** ⭐
+4. **[EXPERIMENTS.md](EXPERIMENTS.md)** - **Experiments Document** ⭐⭐
    - Detailed description of all experiments
    - Experiment purpose, scripts, expected outputs
    - Experiment execution order
@@ -32,69 +39,136 @@
 
 ### 🔬 Specialized Documents
 
-4. **[SEMANTIC_ROUTER_INTEGRATION.md](SEMANTIC_ROUTER_INTEGRATION.md)** - **Semantic Router Integration Research**
-   - Semantic Router introduction
-   - Integration schemes (three approaches)
-   - Implementation recommendations
-   - Advantages analysis
+5. **[JOINT_TRAINING.md](JOINT_TRAINING.md)** - **Joint Training Design** ⭐
+   - Joint training architecture
+   - GRPO algorithm details
+   - Reward function design
+   - Training process
 
-5. **[ADALORA_DESIGNS.md](ADALORA_DESIGNS.md)** - **AdaLoRA-Inspired Designs (Two Approaches)**
-   - Approach 1: Two-stage prediction (current implementation)
-   - Approach 2: One-stage prediction (alternative)
-   - Comparison of both approaches
-   - Implementation plan
+6. **[ANALYSIS.md](ANALYSIS.md)** - **Technical Analysis** ⭐
+   - Input feature design analysis
+   - Controller architecture analysis
+   - Training method analysis
+   - Overhead and feasibility analysis
+
+7. **[DECODE_PHASE_DESIGN.md](DECODE_PHASE_DESIGN.md)** - **Decode Phase Design** ⭐
+   - Decode phase implementation
+   - Configuration preservation
+   - Budget token handling
+
+8. **[BUDGET_ENCODER_TRAINING.md](BUDGET_ENCODER_TRAINING.md)** - **Budget Encoder Training** ⭐
+   - Budget encoder architecture
+   - Training strategy
+   - Sinusoidal encoding vs MLP
+
+9. **[LATENCY_BUDGET_ANALYSIS.md](LATENCY_BUDGET_ANALYSIS.md)** - **Latency Budget Analysis**
+   - Budget range determination
+   - Pareto frontier analysis
+   - Budget sampling strategy
+
+10. **[LATENCY_BUDGET_ENCODING.md](LATENCY_BUDGET_ENCODING.md)** - **Budget Encoding Implementation**
+    - AdaLLaVA-style encoding
+    - Sinusoidal positional encoding
+    - Two-layer MLP design
+    - Budget token integration
+
+11. **[REWARD_DESIGN_EXPLANATION.md](REWARD_DESIGN_EXPLANATION.md)** - **Reward Function Design**
+    - Reward components
+    - Accuracy reward
+    - Latency penalty
+    - Budget violation penalty
+
+12. **[TRAINING_PRINCIPLE.md](TRAINING_PRINCIPLE.md)** - **Training Principles**
+    - GRPO training principles
+    - Reward function design
+    - Training optimization
+
+13. **[TRAINING_FAQ.md](TRAINING_FAQ.md)** - **Training FAQ**
+    - Common questions
+    - Troubleshooting
+    - Best practices
+
+14. **[TRAINING_MODULES.md](TRAINING_MODULES.md)** - **Training Modules Status**
+    - Trainable modules
+    - Frozen modules
+    - Module dependencies
+
+15. **[TRAINING_ISSUES_FIXED.md](TRAINING_ISSUES_FIXED.md)** - **Training Issues Fixed**
+    - Common issues and solutions
+    - Error fixes
+    - Best practices
+
+16. **[EVALUATION_GUIDE.md](EVALUATION_GUIDE.md)** - **Evaluation Guide**
+    - Evaluation methods
+    - Metrics calculation
+    - Best practices
+
+17. **[IMPLEMENTATION_SUMMARY.md](IMPLEMENTATION_SUMMARY.md)** - **Implementation Summary**
+    - Current implementation status
+    - Key design decisions
+    - Update history
+
+### 📚 Additional Documents
+
+18. **[GRPO_EXPLANATION.md](GRPO_EXPLANATION.md)** - **GRPO Algorithm Explanation**
+    - GRPO core concepts
+    - Implementation details
+    - Loss function
+
+19. **[LOOKUP_TABLE_BASELINE.md](LOOKUP_TABLE_BASELINE.md)** - **Lookup Table Baseline**
+    - Baseline controller design
+    - Usage and comparison
+
+20. **[WANDB_USAGE.md](WANDB_USAGE.md)** - **Weights & Biases Usage**
+    - Wandb integration guide
+    - Logging setup
+
+21. **[EXPANDED_BATCH_SIZE_EXPLANATION.md](EXPANDED_BATCH_SIZE_EXPLANATION.md)** - **Expanded Batch Size Explanation**
+    - GRPO batch size concept
+    - Multi-GPU training notes
+
+22. **[LOGGING_TOOL_COMPARISON.md](LOGGING_TOOL_COMPARISON.md)** - **Logging Tool Comparison**
+    - TensorBoard vs wandb comparison
+    - Usage recommendations
 
 ## 🚀 Quick Start
 
-### 1. Train Latency Estimator
+### 1. Train Joint Controller (Stage1 + Stage2)
 
 ```bash
-python experiments/controller/train_latency_estimator.py \
-    --results_dir results/core_exp_h100 \
-    --dataset_names text_vqa coco_2014_vqa \
-    --output_dir checkpoints/latency_estimator \
-    --batch_size 64 \
-    --num_epochs 50 \
-    --lr 1e-3 \
-    --device cuda
+./experiments/controller/run_training.sh
 ```
 
-### 2. Train Two-Stage Controller
+Or manually:
 
-**Stage 1 (Knob1)**:
 ```bash
-python experiments/controller/train_two_stage_controller.py \
-    --results_dir results/core_exp_h100 \
-    --dataset_names text_vqa coco_2014_vqa \
-    --model_path checkpoints/molmo \
-    --output_dir checkpoints/two_stage_controller \
-    --stage stage1 \
-    --batch_size 64 \
-    --num_epochs_stage1 50 \
-    --device cuda
-```
-
-**Stage 2 (Knob2 & Knob3)**:
-```bash
-python experiments/controller/train_two_stage_controller.py \
-    --results_dir results/core_exp_h100 \
-    --dataset_names text_vqa coco_2014_vqa \
-    --model_path checkpoints/molmo \
-    --latency_estimator_path checkpoints/latency_estimator/best_latency_estimator.pt \
-    --output_dir checkpoints/two_stage_controller \
-    --stage stage2 \
-    --batch_size 32 \
-    --num_epochs_stage2 100 \
+python experiments/controller/train_joint_controller.py \
+    --results_dir results/core_exp_h100/5run_2000samples_w_new_importance_score \
+    --dataset_names text_vqa coco_2014_vqa okvqa \
+    --model_path checkpoints \
+    --output_dir checkpoints/joint_controller \
+    --batch_size 8 \
+    --num_epochs 100 \
+    --lr 1e-4 \
+    --stage1_lr_ratio 1.0 \
     --group_size 5 \
-    --device cuda
+    --device cuda \
+    --seed 42 \
+    --use_multi_gpu
 ```
 
-### 3. Test Adaptive Inference
+**Key Points**:
+- **Joint Training**: Stage1 and Stage2 are trained together end-to-end
+- **Direct Latency Measurement**: Uses hooks to measure actual latency (batch_size=1 per sample)
+- **Budget Range**: Latency budgets sampled from [170ms, 380ms] uniformly
+- **No Latency Estimator**: Direct measurement is used for both training and validation
+
+### 2. Test Adaptive Inference
 
 ```bash
 python experiments/controller/test_adaptive_inference.py \
-    --model_path checkpoints/molmo \
-    --controller_path checkpoints/two_stage_controller/stage2/best_stage2_checkpoint.pt \
+    --model_path checkpoints \
+    --controller_path checkpoints/joint_controller/joint_checkpoint_epoch_100.pt \
     --dataset text_vqa \
     --num_samples 100 \
     --latency_budget 200.0 \
@@ -107,105 +181,138 @@ python experiments/controller/test_adaptive_inference.py \
 
 ```
 Stage 1 (Before Vision Encoder):
-  Input: Language Feature + Budget Feature
-  Output: Knob1 (Vision Tokens Tier: low/medium/high)
+  Input: Language Feature + Budget Token (encoded)
+  Output: Knob1 (Vision Tokens Tier: low/medium/high) + Insertion Position (1-5)
   
-Stage 2 (After Vision Encoder + Projector):
-  Input: Vision Feature + Language Feature + Budget Feature
-  Output: Knob2 (MoE Top-K: 4/6/8/10/12) + Knob3 (Transformer Blocks: 8/10/12/14/16)
+Stage 2 (After Insertion Position):
+  Input: Latency Token (from LLM after insertion position)
+  Output: Knob2 (MoE Top-K: 4/5/6/7/8) + Knob3 (Total Blocks: 12/13/14/15/16)
 ```
 
 ### Three Knobs
 
 | Knob | Control Content | Decision Timing | Implementation | Output Space |
 |------|----------------|-----------------|----------------|--------------|
-| **Knob1** | Vision tokens tier | Before vision encoder | Stage 1 predictor | 3 choices |
-| **Knob2** | MoE top-K | After vision encoder | Stage 2 predictor | 5 choices |
-| **Knob3** | Transformer blocks count | After vision encoder | **Importance-based pruning** | 5 choices |
+| **Knob1** | Vision tokens tier + Stage2 insertion position | Before vision encoder | Stage 1 predictor | 3 tiers × 5 positions |
+| **Knob2** | MoE top-K | After insertion position | Stage 2 predictor | 5 choices (4,5,6,7,8) |
+| **Knob3** | Transformer blocks count | After insertion position | **Importance-based pruning** | 5 choices (12-16 total blocks) |
+
+**Key Design**:
+- **First block fixed**: Top-K=8, always included
+- **Dynamic insertion**: Stage1 decides where to insert Stage2 (after block 1-5)
+- **Importance-based selection**: Knob3 uses pre-computed importance scores
+- **Budget token**: Encoded as d_model-dimensional token, concatenated to input sequence
 
 ## 🔑 Key Design Decisions
 
-### 1. Why Two-Stage?
+### 1. Joint Training Only
 
-**Knob1 must be determined before vision encoder** because:
-- Crop count determines how images are processed (tiling, resize)
-- Once images enter vision encoder, crop count is fixed
-- Cannot change vision token count after vision encoding
+**Current Implementation**: Only joint training is supported
+- Stage1 and Stage2 are trained together end-to-end
+- Both stages share the same reward signal
+- GRPO algorithm optimizes both stages simultaneously
 
-### 2. Importance-Based Pruning
+### 2. Direct Latency Measurement
 
-**Knob3 uses importance-based pruning**:
-- Controller only predicts block count (5 choices)
-- Uses pre-computed importance scores to select most important blocks
-- Importance scores are **Data-Agnostic but Task-Dependent**
-- Significantly simplifies controller output space (from 2^16 to 5)
+**No Latency Estimator**: Direct measurement using hooks
+- Batch size = 1 per sample (for accurate latency measurement)
+- Uses PyTorch hooks to measure prefill and decode latency
+- More accurate than estimator, but slower training
 
-### 3. Three Variants of Knob1
+### 3. Budget Token Integration
 
-1. **Budget-Only** (minimal overhead): Only uses latency budget
-2. **Budget + Language** (current default): Uses budget and language features
-3. **Budget + Language + Vision** (highest accuracy): Uses all features, but higher overhead
+**Budget as Token**: Latency budget encoded as token and concatenated
+- Encoded using sinusoidal encoding (256-D) + MLP (to d_model)
+- Concatenated to input sequence in prefill phase only
+- Budget encoder MLP is trainable (sinusoidal encoding is fixed)
 
-### 4. Latency Estimator
+### 4. Decode Phase
 
-**Why do we need Latency Estimator?**
-- Avoids actual model execution during RL training
-- Enables larger batch sizes
-- Accelerates training process
-- Can train different estimators for different hardware
+**Configuration Preservation**: Decode uses prefill configuration
+- Controller runs only in prefill phase
+- Decode phase uses prefill-determined configuration (top_k, num_blocks)
+- Budget token not added in decode phase
 
-## 📊 Performance Targets (SIGMETRICS Standards)
+### 5. Importance-Based Block Selection
 
-- **Overhead**: Controller overhead <0.1% of total inference
-- **Decision Time**: <0.2ms
-- **Effectiveness**: Significantly improves accuracy-latency trade-off
-- **Simplicity**: Simple design, easy to deploy
+**Knob3 Simplification**: Uses pre-computed importance scores
+- Controller predicts total block count (5 choices: 12-16)
+- Blocks selected based on importance scores (task-dependent)
+- Always includes first block and blocks before insertion position
+
+## 📊 Training Configuration
+
+### Current Settings
+
+- **Latency Budget Range**: [170ms, 380ms] (uniform sampling)
+- **Knob2 Options**: [4, 5, 6, 7, 8]
+- **Knob3 Options**: [12, 13, 14, 15, 16] (total blocks)
+- **First Block**: Fixed top_k=8, always included
+- **Insertion Positions**: [1, 2, 3, 4, 5] (after block 1-5)
+- **Max New Tokens**: 64
+- **Batch Size**: 8 (samples processed one by one for latency measurement)
+
+### Training Modules
+
+**Trainable**:
+- Stage1 Controller (knob1_predictor)
+- Stage2 Controller (knob2_knob3_predictor)
+- Budget Encoder MLP (budget_encoder.mlp)
+
+**Frozen**:
+- LLM Model
+- Budget Encoder Sinusoidal Encoding
+- Language Feature Extractor (wte_layer)
 
 ## 🗂️ Code Structure
 
 ```
 experiments/controller/
-├── controller.py                    # Unified two-stage controller
-├── feature_extractors.py           # Feature extraction
+├── controller.py                    # Controller models (Stage1 & Stage2)
+├── feature_extractors.py           # Feature extraction (Language, Budget)
 ├── importance_based_block_selection.py  # Block selection
-├── latency_estimator.py            # Latency estimator
-├── core_exp_data_loader.py         # Data loading
-├── train_latency_estimator.py      # Train latency estimator
-├── train_two_stage_controller.py   # Train two-stage controller
-├── test_adaptive_inference.py      # Test inference pipeline
-└── adaptive_inference.py           # Inference engine
+├── joint_grpo_trainer.py          # Joint GRPO trainer ⭐
+├── train_joint_controller.py      # Main training script ⭐
+├── online_training_dataset.py     # Online training dataset
+├── model_loader.py                # Model loading utility
+├── model_forward_with_dynamic_stage2.py  # Dynamic forward pass
+├── test_adaptive_inference.py     # Test inference pipeline
+├── adaptive_inference.py          # Inference engine
+└── run_training.sh                 # Training script
 ```
 
 ## 📝 Implementation Status
 
 ### ✅ Completed
 
-- [x] Unified Controller implementation (supports three Knob1 variants)
-- [x] Importance-based block selection (supports task-dependent)
-- [x] Latency estimator model and training
-- [x] Stage 1 training (supervised learning)
-- [x] Stage 2 model (GRPO ready)
-- [x] Complete documentation consolidation
+- [x] Joint Training implementation (Stage1 + Stage2)
+- [x] Direct latency measurement (hooks)
+- [x] Budget token integration
+- [x] Dynamic insertion position
+- [x] Importance-based block selection
+- [x] Decode phase configuration preservation
+- [x] Budget encoder MLP training
 
 ### ⏳ In Progress
 
-- [ ] Complete Stage 2 training (requires online execution)
-- [ ] Semantic Router integration research
-- [ ] One-stage AdaLoRA design implementation
+- [ ] Performance evaluation and optimization
+- [ ] Hyperparameter tuning
+- [ ] Multi-dataset evaluation
 
 ### 📋 To Do
 
 - [ ] Complete testing and validation
-- [ ] Performance evaluation and optimization
 - [ ] Hardware-specific optimization
+- [ ] Production deployment guide
 
 ## 🔗 Related Documentation
 
 - **Importance Score Analysis**: `docs/profiling/`
 - **Core Experiment**: `docs/core_exp/`
-- **Code Updates**: See `DESIGN.md` and `ANALYSIS.md`
+- **Code Updates**: See `DESIGN.md` and `JOINT_TRAINING.md`
 
 ---
 
 **Maintainer**: Controller Team  
-**Issues**: Please refer to detailed descriptions in each document
+**Last Updated**: 2026-01-10  
+**Version**: 3.0 (Joint Training Only)

@@ -1,8 +1,8 @@
 # Controller分析文档（统一版）
 
 > **文档状态**: 本文档整合了所有controller分析文档，提供完整的技术分析。
-> **最后更新**: 2026-01-01
-> **版本**: 2.0
+> **最后更新**: 2026-01-10
+> **版本**: 3.0 (Joint Training Only)
 
 ## 目录
 
@@ -31,9 +31,10 @@
 
 **关键设计问题**: Knob1必须在vision encoder之前决定，但vision feature需要经过vision encoder才能获得。
 
-**解决方案**: 两阶段预测架构
-- Stage 1: 在vision encoder之前预测Knob1（不使用vision feature）
-- Stage 2: 在vision encoder之后预测Knob2 & Knob3（可以使用vision feature）
+**解决方案**: 两阶段预测架构（Joint Training）
+- Stage 1: 在vision encoder之前预测Knob1（vision tokens tier + insertion position）
+- Stage 2: 在插入位置之后预测Knob2 & Knob3（使用latency token，已包含budget + vision + language交互信息）
+- **训练方式**: Joint GRPO Training（端到端训练，共享reward信号）
 
 ---
 
@@ -65,7 +66,7 @@
    - Controller需要固定长度的特征向量
    - Mean pooling或CLS token都能提供全局图像表示
 
-**⚠️ 注意**: 对于Stage 2，vision feature必须经过projector，因为Stage 2在vision encoder+projector之后。
+**⚠️ 注意**: Stage 2现在只使用latency token（从插入位置后的transformer block提取），不再需要单独的vision和language features，因为latency token已经包含了与vision和language tokens的交互信息。
 
 ### 2.2 Language Token Feature
 
@@ -99,44 +100,45 @@ def extract_language_feature(prompt: str, tokenizer, wte):
 
 ### 2.3 Latency Budget Feature
 
-#### 方案选择：Latency Encoder（参考AdaLLaVA）
+#### 方案选择：Budget Token（参考AdaLLaVA）
 
-**推荐方案**：
+**当前实现**：
 - 使用sinusoidal positional encoding将scalar转换为256-D向量
-- 使用两层MLP（GELU + layer norm）转换为latency token
+- 使用两层MLP（GELU + layer norm）转换为d_model维token embedding
+- **拼接到输入序列**：`[vision_tokens, language_tokens, budget_token]`
+- Budget token位于序列末尾，经过transformer blocks后获得交互信息
 
 **实现**：
 ```python
 class LatencyBudgetEncoder(nn.Module):
-    """Encode latency budget to feature."""
-    def __init__(self, hidden_dim=256):
+    """Encode latency budget to token embedding."""
+    def __init__(self, d_model=2048, use_sinusoidal=True):
         super().__init__()
-        # Sinusoidal encoding
-        self.pos_encoder = SinusoidalPositionalEncoding(hidden_dim)
+        self.d_model = d_model
+        self.use_sinusoidal = use_sinusoidal
         
-        # MLP
-        self.mlp = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.GELU(),
-            nn.LayerNorm(hidden_dim),
-            nn.Linear(hidden_dim, hidden_dim),
-        )
+        if use_sinusoidal:
+            self.pos_encoding_dim = 256
+            self.mlp = nn.Sequential(
+                nn.Linear(256, d_model),
+                nn.LayerNorm(d_model),
+                nn.GELU(),
+                nn.Linear(d_model, d_model),
+                nn.LayerNorm(d_model),
+            )
     
     def forward(self, budget: torch.Tensor) -> torch.Tensor:
-        """Encode budget scalar to feature."""
-        # Sinusoidal encoding
-        pos_feat = self.pos_encoder(budget.unsqueeze(-1))
-        
-        # MLP
-        feat = self.mlp(pos_feat)
-        
-        return feat
+        """Encode budget to token embedding (B, d_model)."""
+        # Sinusoidal encoding -> 256-D
+        pos_encoded = self._sinusoidal_encoding(budget)
+        # MLP -> d_model-D token
+        return self.mlp(pos_encoded)
 ```
 
-**简化方案**（用于最小overhead）：
-- 直接使用简单的MLP：`nn.Linear(1, hidden_dim)`
-- 不需要sinusoidal encoding
-- 更小的参数量和计算量
+**关键设计**：
+- Budget token在prefill阶段拼接到输入序列
+- 经过transformer blocks后，latency token（最后一个token）包含budget + vision + language交互信息
+- Stage2只需要latency token，不需要单独的budget_feat
 
 ---
 
@@ -153,24 +155,29 @@ class LatencyBudgetEncoder(nn.Module):
 
 ### 3.2 Knob2输出
 
-**格式**: 5个类别的分类（4, 6, 8, 10, 12）
+**格式**: 5个类别的分类（4, 5, 6, 7, 8）
 
 **实现**:
 - 输出logits: (B, 5)
-- 使用CrossEntropy loss训练
+- 使用GRPO loss训练（joint training）
 - 推理时使用argmax或softmax采样
+- **应用范围**: 插入位置之后的所有blocks（第一层固定top_k=8）
 
 ### 3.3 Knob3输出
 
-**格式**: 5个类别的分类（8, 10, 12, 14, 16）
+**格式**: 5个类别的分类（12, 13, 14, 15, 16 total blocks）
 
 **实现**:
-- 输出logits: (B, 5)
-- 使用CrossEntropy loss训练
+- 输出logits: (B, 5)，根据插入位置动态mask
+- 使用GRPO loss训练（joint training）
 - 推理时使用argmax或softmax采样
 - **Block selection**: 基于预计算的importance score（确定性）
+- **动态选项**: 根据插入位置动态调整可用选项数量
 
-**关键设计**: 不需要输出mask（2^16种可能），只需要输出num_blocks（5种可能）
+**关键设计**: 
+- 不需要输出mask（2^16种可能），只需要输出num_blocks（5种可能）
+- Knob3值表示总block数（包括第一层和插入位置之前的blocks）
+- 第一层固定包含，总是使用
 
 ---
 
@@ -214,65 +221,57 @@ Pooled Features → MLP → Knob Heads
 ### 4.2 两阶段架构
 
 **Stage 1**: 轻量级MLP
-- 输入: Language + Budget
-- 输出: Knob1 (tier)
+- 输入: Language Feature + Budget Token (encoded)
+- 输出: Knob1 (tier: low/medium/high) + Insertion Position (1-5)
+- 决策时机: Before vision encoder
 
 **Stage 2**: 轻量级MLP
-- 输入: Vision (pooled) + Language (pooled) + Budget
-- 输出: Knob2 (top_k) + Knob3 (num_blocks)
+- 输入: Latency Token (从插入位置后的transformer block提取)
+- 输出: Knob2 (top_k: 4/5/6/7/8) + Knob3 (num_blocks: 12/13/14/15/16)
+- 决策时机: After insertion position
+- **简化**: 只需要latency token，不需要单独的vision/language/budget features
 
 ---
 
 ## 5. 训练方法分析
 
-### 5.1 Supervised Learning
+### 5.1 Joint GRPO Training（唯一训练方式）
 
-**数据来源**: Core experiment JSON文件
-
-**训练流程**:
-1. 加载core experiment结果
-2. 提取features（language, budget, vision）
-3. 使用ground truth knob values作为label
-4. 训练controller（CrossEntropy loss）
-
-**优点**:
-- 简单稳定
-- 训练快
-- 不需要online execution
-
-**缺点**:
-- 可能无法学习latency budget约束
-- 依赖profiling数据的质量
-
-### 5.2 RL方法（GRPO）
-
-**数据来源**: Online execution + Latency Estimator
+**数据来源**: Online execution（实际运行模型）
 
 **训练流程**:
-1. Controller预测knob configuration
-2. 使用Latency Estimator预估latency
-3. 真实执行模型获取accuracy
-4. 计算reward
-5. GRPO更新
+1. 加载真实数据集样本（images + prompts）
+2. 为每个样本采样latency budget（从[170ms, 380ms]均匀采样）
+3. Stage1预测tier和insertion position
+4. 根据tier处理图像，运行vision encoder + projector
+5. 运行LLM到插入位置，提取latency token
+6. Stage2预测top_k和num_blocks
+7. 应用配置，执行模型生成，测量实际latency
+8. 计算accuracy和reward
+9. GRPO更新（Stage1和Stage2一起更新）
 
 **优点**:
+- 端到端优化，Stage1和Stage2协调
 - 可以学习复杂的accuracy-latency trade-off
 - 可以学习latency budget约束
 - 样本效率高（GRPO）
+- 使用direct latency measurement，更准确
 
 **缺点**:
 - 训练复杂度高
-- 需要Latency Estimator
+- 训练速度较慢（需要实际运行模型）
+- 不能使用大batch size（batch_size=1 per sample）
 
-### 5.3 混合方法（推荐）
+### 5.2 Latency Measurement
 
-**Stage 1**: Supervised Learning
-- 简单稳定
-- 快速收敛
+**当前实现**: Direct Measurement（使用PyTorch hooks）
 
-**Stage 2**: GRPO
-- 学习复杂约束
-- 高效样本利用
+**测量方法**:
+- 使用hooks在vision_backbone和transformer blocks上测量
+- 区分prefill和decode阶段
+- Batch size = 1 per sample（确保准确测量）
+
+**不再使用**: Latency Estimator（保留为独立模块，不用于controller训练）
 
 ---
 
@@ -350,15 +349,18 @@ for i in range(4, 16):
 
 ### 7.3 Joint Training
 
-**可行性**: ✅ 完全可行，且强烈推荐
+**可行性**: ✅ 完全可行，且强烈推荐（当前唯一训练方式）
 
-**方案**: 两阶段训练
-1. Stage 1: 训练controller（LLM frozen）
-2. Stage 2: Joint training（controller + 后12层）
+**方案**: Joint GRPO Training
+1. Stage1和Stage2一起训练，共享reward信号
+2. LLM frozen（不训练）
+3. Budget encoder MLP可训练，sinusoidal encoding固定
 
 **关键技术**:
-- Soft top_k（Gumbel-Softmax）
-- Soft block mask（sigmoid）
+- GRPO算法（Group Relative Policy Optimization）
+- Direct latency measurement（使用hooks）
+- Budget token集成（拼接到输入序列）
+- Dynamic insertion position（Stage1预测）
 
 ---
 
@@ -388,29 +390,35 @@ def select_blocks_by_importance(
     return [block_idx for block_idx, _ in sorted_blocks[:num_blocks]]
 ```
 
-### 8.2 Latency Estimator
+### 8.2 Latency Measurement
 
-**设计**: 轻量级MLP（2-3层）
+**当前设计**: Direct Measurement（使用PyTorch hooks）
 
-**输入特征**:
-- vision_tokens, text_tokens, output_tokens
-- tier_idx, top_k, num_active_blocks
+**测量方法**:
+- 使用hooks在vision_backbone和transformer blocks上测量
+- 区分prefill和decode阶段
+- 在同一个流程中测量所有组件，确保环境一致
 
-**输出预测**: 阶段分解
-- T_vision_encoder, T_projector
-- T_LLM_prefill, T_LLM_decode_per_token
+**不再使用**: Latency Estimator（保留为独立模块，不用于controller训练）
 
-**用途**: 在RL训练中预估latency，避免batch_size=1限制
+**优势**:
+- 更准确（实际测量而非估计）
+- 可以捕获硬件特定的latency特性
+- 简化设计（不需要estimator）
 
-### 8.3 两阶段训练
+### 8.3 Joint Training
 
-**Stage 1**: Supervised Learning
-- 快速收敛
-- 稳定可靠
+**唯一训练方式**: Joint GRPO Training
+- Stage1和Stage2一起训练
+- 共享reward信号
+- 端到端优化
 
-**Stage 2**: GRPO
-- 学习复杂约束
-- 高效样本利用
+**训练模块**:
+- Stage1 Controller (trainable)
+- Stage2 Controller (trainable)
+- Budget Encoder MLP (trainable)
+- LLM Model (frozen)
+- Budget Encoder Sinusoidal Encoding (frozen)
 
 ---
 
@@ -419,18 +427,24 @@ def select_blocks_by_importance(
 ### A. 相关文档
 
 - `DESIGN.md`: 统一的设计文档
-- `controller_implementation_details.md`: 实现细节
-- `knob1_predictor_variants.md`: Knob1变体分析
+- `JOINT_TRAINING.md`: Joint Training详细说明
+- `IMPLEMENTATION_SUMMARY.md`: 实现总结
 
 ### B. 代码实现
 
-- `experiments/controller/two_stage_controller.py`: 两阶段controller
-- `experiments/controller/feature_extractors.py`: 特征提取
-- `experiments/controller/latency_estimator.py`: Latency estimator
+- `experiments/controller/controller.py`: Controller实现（Stage1和Stage2）
+- `experiments/controller/feature_extractors.py`: 特征提取（Language, Budget）
+- `experiments/controller/joint_grpo_trainer.py`: Joint GRPO训练器
+- `experiments/controller/train_joint_controller.py`: 主训练脚本
+- `experiments/controller/model_forward_with_dynamic_stage2.py`: 动态forward pass
 
 ---
 
-**文档维护**: 本文档整合了所有controller分析文档，提供完整的技术分析。
+**文档维护**: 本文档整合了所有controller分析文档，提供完整的技术分析。  
+**最后更新**: 2026-01-10  
+**版本**: 3.0 (Joint Training Only)
+
+
 
 
 

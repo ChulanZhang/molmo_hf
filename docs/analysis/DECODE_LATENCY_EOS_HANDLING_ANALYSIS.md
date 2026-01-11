@@ -107,3 +107,4 @@ T_decode_per_content_token = T_LLM_decode / max(content_tokens, 1)
 - ✅ **可扩展性**：如果未来需要 per-content-token 指标，可以轻松添加
 
 
+

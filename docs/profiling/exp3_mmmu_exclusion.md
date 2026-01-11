@@ -60,3 +60,5 @@ MMMU 数据集已从 core experiment 脚本中排除，原因如下：
 - **run_multi_datasets_h100.py**: MMMU 已注释掉
 - **run_multi_datasets_a100.py**: MMMU 已注释掉
 
+
+
