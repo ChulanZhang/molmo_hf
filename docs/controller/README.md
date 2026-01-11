@@ -25,7 +25,7 @@
    - Overhead analysis
    - Key design decisions
 
-3. **[TRAINING_GUIDE.md](TRAINING_GUIDE.md)** - **Training Guide** ⭐⭐
+3. **[training_guide.md](training_guide.md)** - **Training Guide** ⭐⭐
    - Complete training workflow
    - Step-by-step instructions
    - Hyperparameter tuning
@@ -98,7 +98,7 @@
     - Error fixes
     - Best practices
 
-16. **[EVALUATION_GUIDE.md](EVALUATION_GUIDE.md)** - **Evaluation Guide**
+16. **[evaluation_guide.md](evaluation_guide.md)** - **Evaluation Guide**
     - Evaluation methods
     - Metrics calculation
     - Best practices
@@ -115,7 +115,7 @@
     - Implementation details
     - Loss function
 
-19. **[LOOKUP_TABLE_BASELINE.md](LOOKUP_TABLE_BASELINE.md)** - **Lookup Table Baseline**
+19. **[lookup_table_baseline.md](lookup_table_baseline.md)** - **Lookup Table Baseline**
     - Baseline controller design
     - Usage and comparison
 

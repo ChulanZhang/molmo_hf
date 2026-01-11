@@ -75,7 +75,7 @@ Stage 2 (After Insertion Position):
    - Overhead分析
    - 实现细节
 
-3. **[TRAINING_GUIDE.md](TRAINING_GUIDE.md)** - **训练指南** ⭐⭐
+3. **[training_guide.md](training_guide.md)** - **训练指南** ⭐⭐
    - 完整的训练流程
    - 逐步指导
    - 超参数调优
@@ -261,7 +261,7 @@ python experiments/controller/test_adaptive_inference.py \
 ### 新手入门
 1. 先读 **[README.md](README.md)** 了解整体结构
 2. 再读 **[DESIGN.md](DESIGN.md)** 第1-3章了解核心设计
-3. 最后读 **[TRAINING_GUIDE.md](TRAINING_GUIDE.md)** 了解如何训练
+3. 最后读 **[training_guide.md](training_guide.md)** 了解如何训练
 
 ### 深入理解
 1. **[DESIGN.md](DESIGN.md)** 完整阅读（所有章节）
@@ -269,7 +269,7 @@ python experiments/controller/test_adaptive_inference.py \
 3. **[DECODE_PHASE_DESIGN.md](DECODE_PHASE_DESIGN.md)** Decode阶段设计
 
 ### 实施开发
-1. **[TRAINING_GUIDE.md](TRAINING_GUIDE.md)** 训练指南
+1. **[training_guide.md](training_guide.md)** 训练指南
 2. 查看代码实现：`controller.py`, `train_joint_controller.py`, `joint_grpo_trainer.py`
 3. **[EXPERIMENTS.md](EXPERIMENTS.md)** 实验指南
 

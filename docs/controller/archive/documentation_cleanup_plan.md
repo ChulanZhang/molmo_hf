@@ -14,7 +14,7 @@
 3. **DESIGN.md** - 统一设计文档 ✅
 4. **JOINT_TRAINING.md** - Joint Training详细说明 ✅
 5. **EXPERIMENTS.md** - 实验文档 ✅
-6. **TRAINING_GUIDE.md** - 训练指南 ✅
+6. **training_guide.md** - 训练指南 ✅
 7. **TRAINING_FAQ.md** - 训练FAQ ✅
 8. **TRAINING_PRINCIPLE.md** - 训练原则 ✅
 9. **TRAINING_MODULES.md** - 训练模块状态 ✅
@@ -22,7 +22,7 @@
 11. **BUDGET_ENCODER_TRAINING.md** - Budget encoder训练 ✅
 12. **LATENCY_BUDGET_ANALYSIS.md** - Budget范围分析 ✅
 13. **REWARD_DESIGN_EXPLANATION.md** - Reward设计说明 ✅
-14. **EVALUATION_GUIDE.md** - 评估指南 ✅
+14. **evaluation_guide.md** - 评估指南 ✅
 
 ### 🔄 需要合并的文档
 
@@ -55,7 +55,7 @@
 这些文档有参考价值，但不反映当前实现：
 
 1. **LATENCY_ESTIMATOR_DESIGN.md** - 独立模块，保留但标记为独立
-2. **LATENCY_ESTIMATOR_COMMANDS.md** - 独立模块，保留但标记为独立
+2. **latency_estimator_commands.md** - 独立模块，保留但标记为独立
 3. **LATENCY_ESTIMATOR_IMPROVEMENT.md** - 独立模块，保留但标记为独立
 4. **DECODE_LATENCY_ANALYSIS.md** - 过时分析，归档
 5. **DECODE_LATENCY_PREDICTION_CHALLENGE.md** - 过时分析，归档
@@ -87,7 +87,7 @@ docs/controller/
 ├── DESIGN.md                          # 统一设计文档
 ├── JOINT_TRAINING.md                  # Joint Training详细说明
 ├── EXPERIMENTS.md                     # 实验文档
-├── TRAINING_GUIDE.md                  # 训练指南
+├── training_guide.md                  # 训练指南
 ├── TRAINING_FAQ.md                    # 训练FAQ
 ├── TRAINING_PRINCIPLE.md              # 训练原则
 ├── TRAINING_MODULES.md                # 训练模块状态
@@ -97,7 +97,7 @@ docs/controller/
 ├── LATENCY_BUDGET_ANALYSIS.md         # Budget范围分析
 ├── LATENCY_BUDGET_ENCODING.md         # Budget编码（合并后）
 ├── REWARD_DESIGN_EXPLANATION.md       # Reward设计说明
-├── EVALUATION_GUIDE.md                # 评估指南
+├── evaluation_guide.md                # 评估指南
 ├── IMPLEMENTATION_SUMMARY.md          # 实现总结（合并后）
 │
 ├── research/                          # 研究文档
@@ -106,7 +106,7 @@ docs/controller/
 │
 └── archive/                           # 归档文档
     ├── LATENCY_ESTIMATOR_DESIGN.md    # 独立模块文档
-    ├── LATENCY_ESTIMATOR_COMMANDS.md
+    ├── latency_estimator_commands.md
     ├── LATENCY_ESTIMATOR_IMPROVEMENT.md
     ├── DECODE_LATENCY_ANALYSIS.md
     ├── DECODE_LATENCY_PREDICTION_CHALLENGE.md

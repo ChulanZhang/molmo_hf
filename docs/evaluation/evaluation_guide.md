@@ -110,7 +110,7 @@ python experiments/controller/evaluate_adaptive_inference.py \
     --max_new_tokens 128 \
     --batch_size 1 \
     --device cuda \
-    --output_path ./logs_eval/ \
+    --output_path ./results/logs_eval/ \
     --save_predictions
 ```
 
@@ -124,7 +124,7 @@ python experiments/controller/evaluate_adaptive_inference.py \
 - `--max_new_tokens`: Maximum tokens to generate (default: 128)
 - `--batch_size`: Batch size (default: 1) - **Note: Latency is measured with batch_size=1**
 - `--device`: Device (cuda, cpu) - default: cuda
-- `--output_path`: Output directory (default: ./logs_eval/)
+- `--output_path`: Output directory (default: ./results/logs_eval/)
 - `--save_predictions`: Save individual predictions
 
 **Important Note on Batch Size**: 
@@ -279,7 +279,7 @@ import json
 import matplotlib.pyplot as plt
 
 # Load results
-with open('logs_eval/text_vqa_validation_results.json') as f:
+with open('results/logs_eval/text_vqa_validation_results.json') as f:
     results = json.load(f)
 
 # Plot accuracy vs latency budget
@@ -370,5 +370,5 @@ pip install -e .
 - [AdaLLaVA Paper](https://arxiv.org/pdf/2503.10905)
 - [AdaLLaVA GitHub](https://github.com/zhuoyan-xu/AdaLLaVA)
 - [LMms-Eval Documentation](https://github.com/EvolvingLMMs-Lab/lmms-eval)
-- [LMms-Eval Integration Guide](./LMMS_EVAL_INTEGRATION.md)
+- [LMms-Eval Integration Guide](./lmms_eval_integration.md)
 

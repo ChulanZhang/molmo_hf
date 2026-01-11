@@ -298,7 +298,7 @@ python experiments/controller/profiling_with_importance.py \
 
 ## 相关文档
 
-- **[TRAINING_GUIDE.md](TRAINING_GUIDE.md)**: 详细训练指南
+- **[training_guide.md](training_guide.md)**: 详细训练指南
 - **[TRAINING_FAQ.md](TRAINING_FAQ.md)**: 训练常见问题
 - **[TRAINING_PRINCIPLE.md](TRAINING_PRINCIPLE.md)**: 训练原则
 

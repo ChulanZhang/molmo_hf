@@ -68,7 +68,7 @@ docs/
 │   ├── DESIGN.md                      # 统一设计文档
 │   ├── JOINT_TRAINING.md              # Joint Training详细说明
 │   ├── EXPERIMENTS.md                 # 实验文档
-│   ├── TRAINING_GUIDE.md              # 训练指南
+│   ├── training_guide.md              # 训练指南
 │   ├── TRAINING_FAQ.md                # 训练FAQ
 │   ├── TRAINING_PRINCIPLE.md          # 训练原则
 │   ├── TRAINING_MODULES.md            # 训练模块状态
@@ -78,11 +78,11 @@ docs/
 │   ├── LATENCY_BUDGET_ANALYSIS.md     # Budget范围分析
 │   ├── LATENCY_BUDGET_ENCODING.md     # Budget编码（合并后）
 │   ├── REWARD_DESIGN_EXPLANATION.md   # Reward设计说明
-│   ├── EVALUATION_GUIDE.md            # 评估指南
+│   ├── evaluation_guide.md            # 评估指南
 │   ├── IMPLEMENTATION_SUMMARY.md      # 实现总结（合并后）
 │   ├── ANALYSIS.md                    # Controller分析（已更新）
 │   ├── LATENCY_ESTIMATOR_DESIGN.md    # Latency Estimator设计（独立模块）
-│   ├── LATENCY_ESTIMATOR_COMMANDS.md  # Latency Estimator命令（独立模块）
+│   ├── latency_estimator_commands.md  # Latency Estimator命令（独立模块）
 │   ├── archive/                       # 归档文档
 │   │   ├── DIRECT_LATENCY_MEASUREMENT.md
 │   │   ├── STAGE2_FEATURE_EXTRACTION.md

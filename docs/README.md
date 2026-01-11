@@ -141,7 +141,7 @@ Complete documentation for the adaptive controller system.
 - `DESIGN.md` - Unified design document
 - `JOINT_TRAINING.md` - Joint training details
 - `ANALYSIS.md` - Technical analysis
-- `TRAINING_GUIDE.md` - Training guide
+- `training_guide.md` - Training guide
 - `EXPERIMENTS.md` - Experiments documentation
 
 **Subdirectories**:

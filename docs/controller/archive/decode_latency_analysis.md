@@ -178,7 +178,7 @@ decode_p95 = model.predict_p95(...)
 ## 📚 相关文档
 
 - **[LATENCY_ESTIMATOR_DESIGN.md](LATENCY_ESTIMATOR_DESIGN.md)**: Latency Estimator设计文档
-- **[EVALUATION_GUIDE.md](EVALUATION_GUIDE.md)**: 评估指南
+- **[evaluation_guide.md](evaluation_guide.md)**: 评估指南
 
 ---
 

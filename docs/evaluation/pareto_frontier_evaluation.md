@@ -17,7 +17,7 @@ python experiments/controller/evaluate_pareto_frontier.py \
     --datasets text_vqa okvqa coco_2014_vqa \
     --latency_budgets 170 200 230 260 290 320 350 380 \
     --num_samples 1000 \
-    --output_path ./logs_eval/pareto_frontier/
+    --output_path ./results/results/logs_eval/pareto_frontier/
 ```
 
 ### 步骤 2: 绘制 Pareto Frontier 图
@@ -26,7 +26,7 @@ python experiments/controller/evaluate_pareto_frontier.py \
 
 ```bash
 python experiments/controller/plot_pareto_frontier.py \
-    --pareto_data ./logs_eval/pareto_frontier/pareto_data.json \
+    --pareto_data ./results/results/logs_eval/pareto_frontier/pareto_data.json \
     --output_dir ./plots/pareto_frontier/
 ```
 
@@ -50,7 +50,7 @@ python experiments/controller/plot_pareto_frontier.py \
 - `--num_samples`: 每个数据集评估的样本数（默认: 1000）
 - `--max_new_tokens`: 最大生成 token 数（默认: 128）
 - `--device`: 使用的设备（默认: cuda）
-- `--output_path`: 输出目录（默认: ./logs_eval/pareto_frontier/）
+- `--output_path`: 输出目录（默认: ./results/results/logs_eval/pareto_frontier/）
 - `--save_predictions`: 是否保存每个样本的预测结果
 - `--skip_evaluation`: 跳过评估，只收集已有结果并计算 Pareto frontier
 
@@ -59,7 +59,7 @@ python experiments/controller/plot_pareto_frontier.py \
 评估完成后，会生成以下文件：
 
 ```
-logs_eval/pareto_frontier/
+results/logs_eval/pareto_frontier/
 ├── results/
 │   ├── text_vqa/
 │   │   ├── budget_170/
@@ -114,11 +114,11 @@ python experiments/controller/evaluate_pareto_frontier.py \
     --datasets text_vqa okvqa coco_2014_vqa \
     --latency_budgets 170 200 230 260 290 320 350 380 \
     --num_samples 1000 \
-    --output_path ./logs_eval/pareto_frontier/
+    --output_path ./results/results/logs_eval/pareto_frontier/
 
 # 2. 生成图表
 python experiments/controller/plot_pareto_frontier.py \
-    --pareto_data ./logs_eval/pareto_frontier/pareto_data.json \
+    --pareto_data ./results/results/logs_eval/pareto_frontier/pareto_data.json \
     --output_dir ./plots/pareto_frontier/
 ```
 
@@ -146,7 +146,7 @@ python experiments/controller/evaluate_pareto_frontier.py \
     --datasets text_vqa okvqa coco_2014_vqa \
     --latency_budgets 170 200 230 260 290 320 350 380 \
     --skip_evaluation \
-    --output_path ./logs_eval/pareto_frontier/
+    --output_path ./results/results/logs_eval/pareto_frontier/
 ```
 
 ### 示例 4: 自定义 Latency Budget 范围
@@ -187,7 +187,7 @@ python experiments/controller/evaluate_pareto_frontier.py \
 ```python
 import json
 
-with open('./logs_eval/pareto_frontier/pareto_data.json', 'r') as f:
+with open('./results/logs_eval/pareto_frontier/pareto_data.json', 'r') as f:
     data = json.load(f)
 
 # 查看某个数据集的 Pareto frontier
@@ -285,7 +285,7 @@ python experiments/controller/evaluate_pareto_frontier.py \
 
 ## 参考
 
-- [Lookup Table Baseline Evaluation](./LOOKUP_TABLE_BASELINE_EVALUATION.md)
-- [Evaluation Guide](./EVALUATION_GUIDE.md)
-- [AdaLLaVA Datasets](./ADALLAVA_DATASETS.md)
+- [Lookup Table Baseline Evaluation](./lookup_table_baseline_evaluation.md)
+- [Evaluation Guide](./evaluation_guide.md)
+- [AdaLLaVA Datasets](./adallava_datasets.md)
 

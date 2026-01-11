@@ -101,7 +101,7 @@ for budget in 170 200 230 260 290 320 350 380; do
         --dataset text_vqa \
         --latency_budget $budget \
         --num_samples 1000 \
-        --output_path ./logs_eval/lookup_table_baseline/text_vqa_budget_${budget}/
+        --output_path ./results/results/logs_eval/lookup_table_baseline/text_vqa_budget_${budget}/
 done
 ```
 
@@ -122,7 +122,7 @@ python experiments/controller/evaluate_lookup_table_baseline_batch.py \
     --datasets text_vqa okvqa coco_2014_vqa \
     --latency_budgets 170 200 230 260 290 320 350 380 \
     --num_samples 1000 \
-    --output_path ./logs_eval/lookup_table_baseline/
+    --output_path ./results/logs_eval/lookup_table_baseline/
 ```
 
 #### 2.4 阶段 4: LMms-Eval 框架评估
@@ -136,7 +136,7 @@ python -m experiments.controller.run_lmms_eval_lookup_table \
     --lookup_table_path ./checkpoints/controller/lookup_table_baseline.json \
     --tasks textvqa_val,mme,pope,mmbench_en_dev,scienceqa_img,okvqa_val \
     --latency_budget 200.0 \
-    --output_path ./logs_eval/lookup_table_baseline/lmms_eval/
+    --output_path ./results/logs_eval/lookup_table_baseline/lmms_eval/
 ```
 
 **支持多个 budget**:
@@ -147,7 +147,7 @@ for budget in 170 200 230 260 290 320 350 380; do
         --lookup_table_path ./checkpoints/controller/lookup_table_baseline.json \
         --tasks textvqa_val,mme,pope \
         --latency_budget $budget \
-        --output_path ./logs_eval/lookup_table_baseline/lmms_eval_budget_${budget}/
+        --output_path ./results/results/logs_eval/lookup_table_baseline/lmms_eval_budget_${budget}/
 done
 ```
 
@@ -166,7 +166,7 @@ for budget in 170 200 230 260 290 320 350 380; do
         --dataset text_vqa \
         --latency_budget $budget \
         --num_samples 1000 \
-        --output_path ./logs_eval/grpo_controller/text_vqa_budget_${budget}/
+        --output_path ./results/logs_eval/grpo_controller/text_vqa_budget_${budget}/
 done
 ```
 
@@ -189,7 +189,7 @@ python experiments/controller/evaluate_static_config.py \
     --num_active_blocks 16 \
     --dataset text_vqa \
     --num_samples 1000 \
-    --output_path ./logs_eval/static_config/
+    --output_path ./results/logs_eval/static_config/
 ```
 
 ### 4. 结果分析
@@ -205,7 +205,7 @@ python experiments/controller/evaluate_static_config.py \
 ```python
 # 示例分析脚本
 python scripts/analyze_evaluation_results.py \
-    --results_dir ./logs_eval/lookup_table_baseline/ \
+    --results_dir ./results/results/logs_eval/lookup_table_baseline/ \
     --output_plot ./plots/accuracy_latency_tradeoff.png
 ```
 
@@ -315,7 +315,7 @@ python scripts/analyze_evaluation_results.py \
 ### 9. 输出文件结构
 
 ```
-logs_eval/
+results/logs_eval/
 ├── lookup_table_baseline/
 │   ├── text_vqa/
 │   │   ├── budget_170/
@@ -343,7 +343,7 @@ logs_eval/
 - [AdaLLaVA GitHub](https://github.com/zhuoyan-xu/AdaLLaVA)
 - [AdaLLaVA Paper](https://arxiv.org/pdf/2503.10905)
 - [LMms-Eval Documentation](https://github.com/EvolvingLMMs-Lab/lmms-eval)
-- [Lookup Table Baseline Controller 文档](../controller/LOOKUP_TABLE_BASELINE.md)
+- [Lookup Table Baseline Controller 文档](../controller/lookup_table_baseline.md)
 
 ## 下一步
 

@@ -144,7 +144,7 @@
 3. **DESIGN.md**: 统一设计文档
 4. **JOINT_TRAINING.md**: Joint Training详细说明（合并了JOINT_TRAINING_DESIGN.md）
 5. **EXPERIMENTS.md**: 实验文档
-6. **TRAINING_GUIDE.md**: 训练指南
+6. **training_guide.md**: 训练指南
 
 ### 专题文档
 
@@ -158,7 +158,7 @@
 ### 独立模块文档（保留）
 
 - **LATENCY_ESTIMATOR_DESIGN.md**: Latency Estimator设计（独立模块）
-- **LATENCY_ESTIMATOR_COMMANDS.md**: Latency Estimator命令（独立模块）
+- **latency_estimator_commands.md**: Latency Estimator命令（独立模块）
 
 ## 🚀 快速开始
 
@@ -217,7 +217,7 @@ python experiments/controller/test_adaptive_inference.py \
 ## 🔗 相关文档
 
 - **设计文档**: `DESIGN.md`, `JOINT_TRAINING.md`
-- **训练指南**: `TRAINING_GUIDE.md`, `TRAINING_FAQ.md`
+- **训练指南**: `training_guide.md`, `TRAINING_FAQ.md`
 - **实验文档**: `EXPERIMENTS.md`
 - **专题文档**: `DECODE_PHASE_DESIGN.md`, `BUDGET_ENCODER_TRAINING.md`
 

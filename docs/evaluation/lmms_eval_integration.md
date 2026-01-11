@@ -66,7 +66,7 @@ python -m experiments.controller.run_lmms_eval \
     --controller_path checkpoints/two_stage_controller/stage2/best_stage2_checkpoint.pt \
     --tasks textvqa_val,mme,pope \
     --latency_budget 200.0 \
-    --output_path ./logs_eval/
+    --output_path ./results/logs_eval/
 ```
 
 ### Using Updated test_adaptive_inference.py

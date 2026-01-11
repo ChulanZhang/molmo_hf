@@ -112,7 +112,7 @@ python experiments/controller/visualize_latency_estimator.py \
     --use_all_datasets \
     --batch_size 64 \
     --device cuda \
-    --output_dir visualizations/latency_estimator \
+    --output_dir results/visualizations/latency_estimator \
     --max_samples 10000
 ```
 
@@ -254,7 +254,7 @@ python experiments/controller/visualize_latency_estimator.py \
     --use_all_datasets \
     --batch_size 64 \
     --device cuda \
-    --output_dir visualizations/latency_estimator \
+    --output_dir results/visualizations/latency_estimator \
     --max_samples 10000
 ```
 
@@ -270,7 +270,7 @@ python experiments/controller/visualize_latency_estimator.py \
 2026-01-08 XX:XX:XX - __main__ - INFO - Generating error distribution plots...
 2026-01-08 XX:XX:XX - __main__ - INFO - Saved error_distributions.png
 ...
-2026-01-08 XX:XX:XX - __main__ - INFO - All visualizations saved to visualizations/latency_estimator
+2026-01-08 XX:XX:XX - __main__ - INFO - All visualizations saved to results/visualizations/latency_estimator
 ```
 
 ### 步骤4: 测试功能
@@ -351,7 +351,7 @@ Found 9 datasets: coco_2014_vqa, coco_caption, doc_qa, mmmu, okvqa, science_qa_i
 - **[LATENCY_ESTIMATOR_DESIGN.md](LATENCY_ESTIMATOR_DESIGN.md)**: Latency Estimator设计文档
 - **[POSITIONED_DECODE_LATENCY_TRAINING.md](POSITIONED_DECODE_LATENCY_TRAINING.md)**: Positioned Decode Latency训练策略
 - **[LATENCY_ESTIMATOR_IMPROVEMENT.md](LATENCY_ESTIMATOR_IMPROVEMENT.md)**: 改进方案文档
-- **[EVALUATION_GUIDE.md](EVALUATION_GUIDE.md)**: 评估指南
+- **[evaluation_guide.md](evaluation_guide.md)**: 评估指南
 
 ---
 

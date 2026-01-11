@@ -76,7 +76,7 @@
 根据用户要求，Latency Estimator作为独立模块保留：
 
 - `LATENCY_ESTIMATOR_DESIGN.md` - 保留（独立模块）
-- `LATENCY_ESTIMATOR_COMMANDS.md` - 保留（独立模块）
+- `latency_estimator_commands.md` - 保留（独立模块）
 - `LATENCY_ESTIMATOR_IMPROVEMENT.md` - 需要检查，如果与controller无关，保留；如果相关，归档
 
 ## 📋 待确认的问题
@@ -116,7 +116,7 @@ docs/controller/
 ├── DESIGN.md                          # 统一设计文档
 ├── JOINT_TRAINING.md                  # Joint Training详细说明
 ├── EXPERIMENTS.md                      # 实验文档
-├── TRAINING_GUIDE.md                  # 训练指南
+├── training_guide.md                  # 训练指南
 ├── TRAINING_FAQ.md                    # 训练FAQ
 ├── TRAINING_PRINCIPLE.md              # 训练原则
 ├── TRAINING_MODULES.md                # 训练模块状态
@@ -126,7 +126,7 @@ docs/controller/
 ├── LATENCY_BUDGET_ANALYSIS.md         # Budget范围分析
 ├── LATENCY_BUDGET_ENCODING.md         # Budget编码（合并后）
 ├── REWARD_DESIGN_EXPLANATION.md       # Reward设计说明
-├── EVALUATION_GUIDE.md                # 评估指南
+├── evaluation_guide.md                # 评估指南
 ├── IMPLEMENTATION_SUMMARY.md          # 实现总结（合并后）
 ├── ANALYSIS.md                        # Controller分析（需要检查）
 │

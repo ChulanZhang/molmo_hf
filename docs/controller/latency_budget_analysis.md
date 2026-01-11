@@ -2,6 +2,24 @@
 
 ## 分析结果（基于3个数据集）
 
+> **新增：仅对 prefill latency 的统计（核心实验全量结果）**
+>
+> 从 `results/core_exp_h100` 全部 JSON 重新汇总 `T_LLM_prefill`（总计 1,638,588 条样本）：
+> - min: **68.7 ms**
+> - p5 / p25 / median / p75 / p95: **102.3 / 119.7 / 135.0 / 151.7 / 175.3 ms**
+> - max: **607.7 ms**（极端长尾）
+> - mean / std: **136.3 / 22.2 ms**
+>
+> **建议（仅 prefill 约束时）**：
+> - 训练/验证的预算采样范围：**100 ms – 180 ms**（覆盖 p5–p95，剔除长尾）
+> - 如果需要更保险的上界，可放宽到 **200 ms**，但仍保持主要约束在 prefill。
+>
+> **decode latency 暂不计入预算**：保持当前“硬约束只看 prefill”策略，decode 长度不确定，先不做预算判定。
+>
+> **若未来发现 decode 主导总延迟**（例如长回答任务），可考虑：
+> - 软罚项：`latency_penalty = max(0, prefill - budget_prefill) + α * max(0, decode - decode_target)`，其中 α 取 0.1~0.2；`decode_target` 可按生成 token 数（如 16）或经验均值设定。
+> - 或直接缩短 `max_new_tokens`（如 8~16）来间接压制 decode 延迟。
+
 ### 数据集分析
 
 #### Text-VQA

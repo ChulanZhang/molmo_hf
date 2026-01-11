@@ -4,7 +4,7 @@
 
 ### 1. 文档设计
 
-✅ **实验设计文档** (`LOOKUP_TABLE_BASELINE_EVALUATION.md`)
+✅ **实验设计文档** (`lookup_table_baseline_evaluation.md`)
 - 完整的实验目标、设置、流程设计
 - 8 个 latency budget 点（170-380ms）
 - 多数据集评估计划
@@ -163,8 +163,8 @@ experiments/controller/
 └── lmms_eval_lookup_table_adapter.py    # ✅ LMms-Eval 适配器
 
 docs/evaluation/
-├── LOOKUP_TABLE_BASELINE_EVALUATION.md   # ✅ 实验设计文档
-└── LOOKUP_TABLE_BASELINE_IMPLEMENTATION.md # ✅ 本文档
+├── lookup_table_baseline_evaluation.md   # ✅ 实验设计文档
+└── lookup_table_baseline_implementation.md # ✅ 本文档
 ```
 
 ## 下一步行动
@@ -219,8 +219,8 @@ docs/evaluation/
 - [AdaLLaVA GitHub](https://github.com/zhuoyan-xu/AdaLLaVA)
 - [AdaLLaVA Paper](https://arxiv.org/pdf/2503.10905)
 - [LMms-Eval Documentation](https://github.com/EvolvingLMMs-Lab/lmms-eval)
-- [Lookup Table Baseline Controller 文档](../controller/LOOKUP_TABLE_BASELINE.md)
-- [评估指南](./EVALUATION_GUIDE.md)
+- [Lookup Table Baseline Controller 文档](../controller/lookup_table_baseline.md)
+- [评估指南](./evaluation_guide.md)
 
 ## 总结
 

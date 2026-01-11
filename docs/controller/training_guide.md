@@ -70,7 +70,7 @@ python experiments/controller/train_joint_controller.py \
 
 训练日志会保存到：
 - **控制台输出**：实时显示训练进度
-- **日志文件**：`joint_controller_training.log`
+- **日志文件**：`results/logs/training/joint_controller_training.log`
 
 ### 6. 训练流程
 

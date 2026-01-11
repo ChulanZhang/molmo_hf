@@ -233,7 +233,7 @@ python experiments/controller/visualize_latency_estimator.py \
     --results_dir results/core_exp_h100/4run_2000samples \
     --use_all_datasets \
     --device cuda \
-    --output_dir visualizations/latency_estimator \
+    --output_dir results/visualizations/latency_estimator \
     --max_samples 10000
 
 # 或者不指定dataset_names，会自动检测所有数据集
@@ -241,7 +241,7 @@ python experiments/controller/visualize_latency_estimator.py \
     --checkpoint_path checkpoints/latency_estimator/best_latency_estimator.pt \
     --results_dir results/core_exp_h100/4run_2000samples \
     --device cuda \
-    --output_dir visualizations/latency_estimator \
+    --output_dir results/visualizations/latency_estimator \
     --max_samples 10000
 
 # 指定特定数据集
@@ -250,13 +250,13 @@ python experiments/controller/visualize_latency_estimator.py \
     --results_dir results/core_exp_h100/4run_2000samples \
     --dataset_names text_vqa coco_2014_vqa coco_caption \
     --device cuda \
-    --output_dir visualizations/latency_estimator \
+    --output_dir results/visualizations/latency_estimator \
     --max_samples 10000
 ```
 
 ### 生成的可视化图表
 
-脚本会生成以下图表，保存在`visualizations/latency_estimator/`目录：
+脚本会生成以下图表，保存在`results/visualizations/latency_estimator/`目录：
 
 #### 1. **散点图 (scatter_plots.png)**
    - **Prefill Latency散点图**: 预测值 vs 真实值
