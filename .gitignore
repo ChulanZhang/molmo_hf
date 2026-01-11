@@ -29,3 +29,22 @@ EOF
 
 # lock files
 *.lock
+# Temporary analysis and comparison scripts
+compare_importance_scores.py
+visualize_comparison.py
+
+# Temporary commit preparation scripts
+scripts/prepare_bugfix_commit.sh
+scripts/prepare_exp3_final_commit.sh
+scripts/prepare_profiling_commit.sh
+scripts/rename_docs.py
+scripts/update_doc_references.py
+
+# Evaluation results and outputs
+evaluation_results.json
+analysis_output/
+logs_eval/
+visualizations/
+
+# Cursor configuration (local IDE settings)
+.cursor/
