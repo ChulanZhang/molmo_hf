@@ -114,6 +114,10 @@ class LanguageFeatureExtractor:
         )
         input_ids = tokens['input_ids']  # (1, seq_len)
         
+        # Move input_ids to the same device as wte_layer
+        wte_device = next(self.wte_layer.parameters()).device
+        input_ids = input_ids.to(wte_device)
+        
         with torch.no_grad():
             # Get embeddings
             token_embeds = self.wte_layer(input_ids)  # (1, seq_len, d_model)
@@ -126,53 +130,57 @@ class LanguageFeatureExtractor:
 
 class LatencyBudgetEncoder(nn.Module):
     """
-    Encode latency budget to feature vector.
-    Uses simple MLP (or sinusoidal + MLP like AdaLLaVA).
+    Encode latency budget to token embedding (d_model dimension).
+    
+    This creates a latency budget token that will be concatenated to the input sequence.
+    The token is projected to d_model (same as vision and language tokens) so it can be
+    processed by the transformer. After the first block, this token contains information
+    from budget, vision, and language tokens through attention.
+    
+    Uses sinusoidal encoding + MLP (like AdaLLaVA) to project to d_model.
     """
     
     def __init__(
         self,
-        hidden_dim: int = 256,
-        use_sinusoidal: bool = False,
+        d_model: int = 2048,  # Transformer hidden dimension (same as vision/language tokens)
+        use_sinusoidal: bool = True,  # Use sinusoidal encoding (like AdaLLaVA)
         normalize_budget: bool = True,
         budget_min: float = 50.0,
         budget_max: float = 500.0,
     ):
         """
         Args:
-            hidden_dim: Hidden dimension for budget encoding
+            d_model: Transformer hidden dimension (output dimension for token embedding)
             use_sinusoidal: If True, use sinusoidal encoding (like AdaLLaVA)
             normalize_budget: If True, normalize budget to [0, 1]
             budget_min: Minimum budget value for normalization
             budget_max: Maximum budget value for normalization
         """
         super().__init__()
-        self.hidden_dim = hidden_dim
+        self.d_model = d_model
         self.use_sinusoidal = use_sinusoidal
         self.normalize_budget = normalize_budget
         self.budget_min = budget_min
         self.budget_max = budget_max
         
         if use_sinusoidal:
-            # AdaLLaVA style: sinusoidal + MLP
+            # AdaLLaVA style: sinusoidal + MLP to d_model
             self.pos_encoding_dim = 256
             self.mlp = nn.Sequential(
-                nn.Linear(self.pos_encoding_dim, hidden_dim),
-                nn.LayerNorm(hidden_dim),
+                nn.Linear(self.pos_encoding_dim, d_model),
+                nn.LayerNorm(d_model),
                 nn.GELU(),
-                nn.Linear(hidden_dim, hidden_dim),
-                nn.LayerNorm(hidden_dim),
-                nn.GELU(),
+                nn.Linear(d_model, d_model),
+                nn.LayerNorm(d_model),
             )
         else:
-            # Simple MLP
+            # Direct MLP to d_model
             self.encoder = nn.Sequential(
-                nn.Linear(1, hidden_dim),
-                nn.LayerNorm(hidden_dim),
+                nn.Linear(1, d_model),
+                nn.LayerNorm(d_model),
                 nn.GELU(),
-                nn.Linear(hidden_dim, hidden_dim),
-                nn.LayerNorm(hidden_dim),
-                nn.GELU(),
+                nn.Linear(d_model, d_model),
+                nn.LayerNorm(d_model),
             )
     
     def _sinusoidal_encoding(self, x: torch.Tensor) -> torch.Tensor:
@@ -201,13 +209,13 @@ class LatencyBudgetEncoder(nn.Module):
     
     def forward(self, budget: torch.Tensor) -> torch.Tensor:
         """
-        Encode latency budget.
+        Encode latency budget to token embedding.
         
         Args:
             budget: (B,) latency budget in ms
         
         Returns:
-            budget_feat: (B, hidden_dim)
+            budget_token: (B, d_model) - token embedding ready to be concatenated to sequence
         """
         # Normalize budget if needed
         if self.normalize_budget:
@@ -219,10 +227,10 @@ class LatencyBudgetEncoder(nn.Module):
         if self.use_sinusoidal:
             # Sinusoidal encoding
             pos_encoded = self._sinusoidal_encoding(budget)  # (B, 256)
-            return self.mlp(pos_encoded)  # (B, hidden_dim)
+            return self.mlp(pos_encoded)  # (B, d_model)
         else:
             # Direct MLP
-            return self.encoder(budget)  # (B, hidden_dim)
+            return self.encoder(budget)  # (B, d_model)
 
 
 class FeatureExtractionPipeline:

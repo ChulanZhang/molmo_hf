@@ -835,6 +835,16 @@ class MolmoeSparseMoeBlock(nn.Module):
         # we cast back to the input dtype
         routing_weights = routing_weights.to(hidden_states.dtype)
 
+        # Validate selected_experts to prevent CUDA device-side assert errors
+        # selected_experts should be in range [0, num_experts-1]
+        if selected_experts.max() >= self.num_experts or selected_experts.min() < 0:
+            log.warning(
+                f"[MolmoeSparseMoeBlock.forward] Invalid selected_experts range: "
+                f"min={selected_experts.min().item()}, max={selected_experts.max().item()}, "
+                f"num_experts={self.num_experts}. Clamping to valid range."
+            )
+            selected_experts = torch.clamp(selected_experts, min=0, max=self.num_experts - 1)
+
         final_hidden_states = torch.zeros(
             (batch_size * sequence_length, hidden_dim), dtype=hidden_states.dtype, device=hidden_states.device
         )
@@ -847,6 +857,7 @@ class MolmoeSparseMoeBlock(nn.Module):
         expert_mask = torch.nn.functional.one_hot(selected_experts, num_classes=self.num_experts).permute(2, 1, 0)
 
         # Loop over all available experts in the model and perform the computation on each expert
+        max_valid_idx = batch_size * sequence_length - 1
         for expert_idx in range(self.num_experts):
             expert_layer = self.experts[expert_idx]
             row_indices, col_indices = torch.where(expert_mask[expert_idx])
@@ -855,6 +866,24 @@ class MolmoeSparseMoeBlock(nn.Module):
 
             idx = row_indices
             top_x = col_indices
+
+            # Validate indices to prevent CUDA device-side assert errors
+            valid_mask = (top_x >= 0) & (top_x <= max_valid_idx)
+            if not valid_mask.all():
+                # Filter out invalid indices
+                n_invalid = (~valid_mask).sum().item()
+                if n_invalid > 0:
+                    log.debug(f"[MolmoeSparseMoeBlock.forward] Filtering {n_invalid} invalid indices (expert {expert_idx}, max_valid={max_valid_idx})")
+                    top_x = top_x[valid_mask]
+                    idx = idx[valid_mask]
+                
+                if top_x.numel() == 0:
+                    continue
+
+            # Additional bounds check before indexing (safety check)
+            if top_x.numel() > 0 and (top_x.max() >= batch_size * sequence_length or top_x.min() < 0):
+                log.warning(f"[MolmoeSparseMoeBlock.forward] Invalid top_x range after filtering: min={top_x.min().item()}, max={top_x.max().item()}, max_valid={max_valid_idx}")
+                continue
 
             current_state = hidden_states[top_x].reshape(-1, hidden_dim)
             routing_weights_rows = routing_weights[top_x]
@@ -1843,6 +1872,8 @@ class MolmoModel(MolmoPretrainedModel):
         last_logits_only: bool = False,
         output_hidden_states: Optional[bool] = None,
         append_last_valid_logits: Optional[torch.Tensor] = None,
+        latency_budget: Optional[torch.Tensor] = None,  # (B,) latency budget in ms
+        budget_encoder: Optional[torch.nn.Module] = None,  # LatencyBudgetEncoder instance
     ) -> MolmoOutput:
         """
         :param input_ids: A tensor of shape `(batch_size, seq_len)`.
@@ -1948,7 +1979,11 @@ class MolmoModel(MolmoPretrainedModel):
             log.debug(f"[MolmoModel.forward] STEP 3: Valid indices: {n_valid_indices}, Invalid indices (marked as -100): {n_invalid_indices}")
 
             x_flat = x.view(batch_size * seq_len, -1)
-            image_flat = image_features.to(x.device)
+            # Ensure image_flat has the same dtype and device as x_flat for index_add_
+            image_flat = image_features.to(device=x.device, dtype=x.dtype)
+            # Flatten image_flat to 2D: (batch_size * num_image * num_patch, d_model)
+            # This is required for index_add_ which expects source to be 2D
+            image_flat = image_flat.view(-1, image_flat.shape[-1])
             batch_offsets = (
                 torch.arange(batch_size, device=x.device)
                 .unsqueeze(1)
@@ -1957,15 +1992,26 @@ class MolmoModel(MolmoPretrainedModel):
             )
             linear_idx = (batch_offsets + image_input_idx).view(-1)
 
-            # Check for out-of-bounds indices
+            # Check for out-of-bounds indices and filter invalid ones
             max_valid_idx = batch_size * seq_len - 1
-            n_oob = (linear_idx > max_valid_idx).sum().item()
-            if n_oob > 0:
-                log.warning(f"[MolmoModel.forward] STEP 4: Found {n_oob} out-of-bounds indices (max_valid={max_valid_idx})")
+            # Filter out negative indices (invalid positions) and out-of-bounds indices
+            # Note: Invalid indices (negative or out-of-bounds) are expected for:
+            # - Image padding positions (marked as -1 or -100)
+            # - Positions beyond sequence length
+            # - Unused image positions in multi-image batches
+            valid_mask = (linear_idx >= 0) & (linear_idx <= max_valid_idx)
+            n_invalid = (~valid_mask).sum().item()
+            if n_invalid > 0:
+                # This is expected behavior, so use debug level instead of warning
+                log.debug(f"[MolmoModel.forward] STEP 4: Filtering {n_invalid} invalid indices (negative or out-of-bounds, max_valid={max_valid_idx})")
+                linear_idx = linear_idx[valid_mask]
+                image_flat = image_flat[valid_mask]
             else:
                 log.debug(f"[MolmoModel.forward] STEP 4: All indices valid (max_idx={linear_idx.max().item()}, max_valid={max_valid_idx})")
 
-            x_flat.index_add_(0, linear_idx, image_flat)
+            # Only call index_add_ if there are valid indices
+            if linear_idx.numel() > 0:
+                x_flat.index_add_(0, linear_idx, image_flat)
             x = x_flat.view(batch_size, seq_len, -1)
             
             log.debug(f"[MolmoModel.forward] STEP 5: After inserting image features: x shape={x.shape}")
@@ -1985,6 +2031,46 @@ class MolmoModel(MolmoPretrainedModel):
                     torch.cumsum(attention_mask, dim=-1) - 1,
                     min=0,
                 ).broadcast_to((batch_size, attention_mask.shape[-1]))
+
+        # Add latency budget token to the sequence (if provided)
+        # Budget token is encoded as d_model-dimensional token and concatenated to input sequence
+        # IMPORTANT: Only add budget token in prefill phase (past_key_values is None)
+        # In decode phase (past_key_values is not None), we don't add budget token again
+        # This ensures decode phase uses prefill configuration without re-running controller
+        if latency_budget is not None and budget_encoder is not None and past_key_values is None:
+            import logging
+            log = logging.getLogger(__name__)
+            
+            # Encode budget to token embedding (d_model dimension)
+            budget_token = budget_encoder(latency_budget)  # (B, d_model)
+            budget_token = budget_token.unsqueeze(1)  # (B, 1, d_model)
+            
+            # Concatenate budget token at the end of sequence
+            x = torch.cat([x, budget_token], dim=1)  # (B, seq_len + 1, d_model)
+            
+            # Update seq_len to account for budget token
+            seq_len = x.shape[1]
+            
+            # Update attention mask to include budget token
+            if attention_mask is not None:
+                # attention_mask shape: (batch_size, 1, 1, seq_len) or (batch_size, seq_len)
+                if len(attention_mask.shape) == 4:
+                    # Expand to include budget token (1 = not masked)
+                    budget_mask = torch.ones(batch_size, 1, 1, 1, device=attention_mask.device, dtype=attention_mask.dtype)
+                    attention_mask = torch.cat([attention_mask, budget_mask], dim=-1)
+                elif len(attention_mask.shape) == 2:
+                    # Expand to include budget token (1 = not masked)
+                    budget_mask = torch.ones(batch_size, 1, device=attention_mask.device, dtype=attention_mask.dtype)
+                    attention_mask = torch.cat([attention_mask, budget_mask], dim=-1)
+            
+            # Update position_ids if provided
+            if position_ids is not None:
+                # Budget token gets the next position ID
+                max_pos = position_ids.max(dim=-1, keepdim=True)[0]  # (B, 1)
+                budget_pos = max_pos + 1  # (B, 1)
+                position_ids = torch.cat([position_ids, budget_pos], dim=-1)  # (B, seq_len + 1)
+            
+            log.debug(f"[MolmoModel.forward] Added budget token in prefill: x shape={x.shape}, attention_mask shape={attention_mask.shape if attention_mask is not None else None}")
 
         # Add input + positional embeddings and apply dropout.
         # shape: (batch_size, seq_len, d_model)
@@ -2480,6 +2566,8 @@ class MolmoForCausalLM(PreTrainedModel):
         image_masks=None,
         image_input_idx=None,
         generation_config=None,
+        latency_budget=None,  # (B,) latency budget in ms
+        budget_encoder=None,  # LatencyBudgetEncoder instance
         **kwargs,
     ):
         if generation_config is not None:
