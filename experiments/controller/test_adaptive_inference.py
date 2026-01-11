@@ -27,7 +27,7 @@ log = logging.getLogger(__name__)
 
 
 def test_stage1_prediction(
-    knob1_predictor: Knob1Predictor,
+    knob1_predictor: Knob1PredictorBudgetLanguage,
     lang_extractor: LanguageFeatureExtractor,
     budget_encoder: LatencyBudgetEncoder,
     device: str = "cuda",
@@ -132,18 +132,18 @@ def test_latency_estimator(
         {
             "vision_tokens": 1008,
             "text_tokens": 45,
-            "output_tokens": 8,
             "tier": "medium",
             "top_k": 8,
             "num_active_blocks": 12,
+            "expected_output_tokens": 8,  # For total latency calculation
         },
         {
             "vision_tokens": 1440,
             "text_tokens": 50,
-            "output_tokens": 10,
             "tier": "high",
             "top_k": 12,
             "num_active_blocks": 16,
+            "expected_output_tokens": 10,  # For total latency calculation
         },
     ]
     
@@ -153,21 +153,41 @@ def test_latency_estimator(
         
         latency_estimator.eval()
         with torch.no_grad():
-            latencies = latency_estimator(
+            # Get prefill latency
+            prefill_latency = latency_estimator(
                 vision_tokens=torch.tensor([case['vision_tokens']], device=device),
                 text_tokens=torch.tensor([case['text_tokens']], device=device),
                 tier_idx=torch.tensor([tier_idx], device=device),
                 top_k=torch.tensor([case['top_k']], device=device),
                 num_active_blocks=torch.tensor([case['num_active_blocks']], device=device),
-                output_tokens=torch.tensor([case['output_tokens']], device=device),
-            )
+                token_position=torch.tensor([1.0], device=device),  # Position doesn't matter for prefill
+            )['T_prefill_total'].item()
+            
+            # Predict decode latency at all positions and sum
+            expected_output_tokens = case['expected_output_tokens']
+            if expected_output_tokens > 0:
+                positions = torch.arange(1, expected_output_tokens + 1, device=device).float()
+                decode_latencies = latency_estimator.predict_decode_at_positions(
+                    vision_tokens=torch.tensor([case['vision_tokens']], device=device),
+                    text_tokens=torch.tensor([case['text_tokens']], device=device),
+                    tier_idx=torch.tensor([tier_idx], device=device),
+                    top_k=torch.tensor([case['top_k']], device=device),
+                    num_active_blocks=torch.tensor([case['num_active_blocks']], device=device),
+                    positions=positions,
+                )[0]  # (expected_output_tokens,)
+                decode_total = decode_latencies.sum().item()
+            else:
+                decode_total = 0.0
+            
+            T_prefill_total = prefill_latency
+            T_total = T_prefill_total + decode_total
+            T_decode_per_token_avg = decode_total / max(expected_output_tokens, 1)  # Average for display
         
         log.info(f"Test {i+1}:")
         log.info(f"  Config: tier={case['tier']}, top_k={case['top_k']}, blocks={case['num_active_blocks']}")
-        log.info(f"  T_vision_total: {latencies['T_vision_total'].item():.2f}ms")
-        log.info(f"  T_LLM_prefill: {latencies['T_LLM_prefill'].item():.2f}ms")
-        log.info(f"  T_LLM_decode_per_token: {latencies['T_LLM_decode_per_token'].item():.2f}ms")
-        log.info(f"  T_total: {latencies['T_total'].item():.2f}ms")
+        log.info(f"  T_prefill_total: {T_prefill_total:.2f}ms")
+        log.info(f"  T_decode_per_token: {T_decode_per_token:.3f}ms/token")
+        log.info(f"  T_total (with {case['expected_output_tokens']} tokens): {T_total:.2f}ms")
         log.info("")
     
     log.info("Latency estimator test completed!\n")
@@ -222,6 +242,64 @@ def test_full_pipeline(
         log.error(f"Error creating engine: {e}")
         log.error("This is expected if checkpoints are not available")
         log.error("Please train the controller first")
+
+
+def evaluate_with_lmms_eval(
+    model_path: str,
+    controller_path: str,
+    dataset: str = "text_vqa",
+    num_samples: int = 100,
+    latency_budget: float = 200.0,
+    device: str = "cuda",
+    output_path: str = "./logs_eval/",
+):
+    """Evaluate using lmms-eval framework."""
+    log.info("=" * 80)
+    log.info("Running LMms-Eval Evaluation")
+    log.info("=" * 80)
+    
+    try:
+        from experiments.controller.run_lmms_eval import run_lmms_eval
+        
+        # Map dataset names to lmms-eval task names
+        task_map = {
+            "text_vqa": "textvqa_val",
+            "textvqa": "textvqa_val",
+            "okvqa": "okvqa_val",
+            "vqa": "vqav2_val",
+            "vqa2": "vqav2_val",
+            "mme": "mme",
+            "pope": "pope",
+            "mmbench": "mmbench_en_dev",
+            "science_qa": "scienceqa_img",
+            "scienceqa": "scienceqa_img",
+        }
+        
+        task_name = task_map.get(dataset.lower(), dataset)
+        
+        log.info(f"Dataset: {dataset} -> Task: {task_name}")
+        log.info(f"Num samples: {num_samples}")
+        log.info(f"Latency budget: {latency_budget}ms")
+        
+        run_lmms_eval(
+            model_path=model_path,
+            controller_path=controller_path,
+            tasks=task_name,
+            latency_budget=latency_budget,
+            max_new_tokens=512,
+            batch_size=1,
+            output_path=output_path,
+            device=device,
+            deterministic=True,
+        )
+        
+    except ImportError:
+        log.error("lmms-eval evaluation requires lmms-eval to be installed")
+        log.error("Please install it first (see run_lmms_eval.py for instructions)")
+    except Exception as e:
+        log.error(f"Error in lmms-eval evaluation: {e}")
+        import traceback
+        traceback.print_exc()
 
 
 def main():
@@ -279,6 +357,35 @@ def main():
         action="store_true",
         help="Run all tests"
     )
+    parser.add_argument(
+        "--evaluate",
+        action="store_true",
+        help="Run evaluation using lmms-eval"
+    )
+    parser.add_argument(
+        "--dataset",
+        type=str,
+        default="text_vqa",
+        help="Dataset name for evaluation (text_vqa, okvqa, mme, etc.)"
+    )
+    parser.add_argument(
+        "--num_samples",
+        type=int,
+        default=100,
+        help="Number of samples to evaluate (0 = all)"
+    )
+    parser.add_argument(
+        "--latency_budget",
+        type=float,
+        default=200.0,
+        help="Latency budget in milliseconds"
+    )
+    parser.add_argument(
+        "--output_path",
+        type=str,
+        default="./logs_eval/",
+        help="Output path for evaluation results"
+    )
     
     args = parser.parse_args()
     
@@ -299,7 +406,7 @@ def main():
     
     # Test Stage 1
     if args.test_stage1:
-        knob1_predictor = Knob1Predictor().to(args.device)
+        knob1_predictor = Knob1PredictorBudgetLanguage().to(args.device)
         # Load checkpoint if available
         if args.controller_path:
             try:
@@ -344,6 +451,21 @@ def main():
             test_full_pipeline(args.model_path, args.controller_path, args.device)
         else:
             log.warning("Controller path not provided - skipping full pipeline test")
+    
+    # Run Evaluation with lmms-eval
+    if args.evaluate:
+        if args.controller_path:
+            evaluate_with_lmms_eval(
+                model_path=args.model_path,
+                controller_path=args.controller_path,
+                dataset=args.dataset,
+                num_samples=args.num_samples,
+                latency_budget=args.latency_budget,
+                device=args.device,
+                output_path=args.output_path,
+            )
+        else:
+            log.error("Controller path is required for evaluation")
     
     log.info("All tests completed!")
 
