@@ -22,7 +22,17 @@ docs/
 │   ├── how_to_use_eos_token.md       # EOS token usage
 │   ├── max_new_tokens_knob.md        # max_new_tokens parameter
 │   └── model_inference_flow.md        # Inference pipeline
-├── analysis/                           # Result analysis (content moved to knobs)
+├── analysis/                           # Latency measurement analysis
+│   ├── README.md                      # Analysis index
+│   ├── key_insights_latency_measurement.md
+│   ├── latency_measurement_refactoring.md
+│   └── ...                            # Other analysis documents
+├── controller/                         # 🆕 Controller design and training
+│   ├── README.md                      # Controller documentation index
+│   ├── DESIGN.md                      # Unified design document
+│   ├── JOINT_TRAINING.md              # Joint training details
+│   ├── archive/                       # Archived documents
+│   └── research/                      # Research documents
 ├── core_exp/                           # 🆕 Core experiments documentation
 │   ├── README.md                      # Experiments overview and quick reference
 │   ├── coco_caption_evaluation.md     # COCO Caption evaluation guide
@@ -109,11 +119,34 @@ Technical documents for understanding code implementation, model architecture, a
 
 **Note**: Transformer blocks and vision tokens content has been integrated into `knobs/` directory documents.
 
-### 📊 analysis/ - Result Analysis
+### 📊 analysis/ - Latency Measurement Analysis
 
-Analysis and interpretation of experimental results.
+Analysis and interpretation of latency measurement issues, solutions, and refactoring.
 
-**Note**: Crop overlap analysis has been integrated into `knobs/vision_tokens_knob.md`. This directory is currently empty.
+**Key Documents**:
+- `key_insights_latency_measurement.md` - Key insights summary
+- `latency_measurement_refactoring.md` - Complete refactoring documentation
+- `latency_measurement_issue_summary.md` - Issue summary
+- `decode_measurement_strategy.md` - Decode measurement strategy
+- `tier_fallback_analysis.md` - Tier fallback analysis
+
+**Note**: These documents focus on latency measurement mechanisms and are valuable for understanding the measurement system.
+
+### 🎮 controller/ - Controller Design and Training
+
+Complete documentation for the adaptive controller system.
+
+**Key Documents**:
+- `README.md` - Documentation index
+- `DESIGN.md` - Unified design document
+- `JOINT_TRAINING.md` - Joint training details
+- `ANALYSIS.md` - Technical analysis
+- `TRAINING_GUIDE.md` - Training guide
+- `EXPERIMENTS.md` - Experiments documentation
+
+**Subdirectories**:
+- `archive/` - Archived documents (outdated but potentially useful)
+- `research/` - Research documents (design exploration)
 
 ### 🛠️ development/ - Development and Refactoring
 
@@ -156,8 +189,19 @@ Documents for code refactoring, optimization, and development plans.
 - Batch size content integrated into `mechanisms/batch_size_optimization.md`
 
 ### I Want to Analyze Results
-👉 See `knobs/` directory (content moved from analysis/)
+👉 See `analysis/` directory (latency measurement analysis)
+- Key insights → `analysis/key_insights_latency_measurement.md`
+- Complete refactoring → `analysis/latency_measurement_refactoring.md`
+
+👉 See `knobs/` directory (control knob analysis)
 - Vision tokens and crop overlap → `knobs/vision_tokens_knob.md`
+
+### I Want to Understand Controller Design
+👉 See `controller/` directory
+- Quick start → `controller/OVERVIEW.md`
+- Design document → `controller/DESIGN.md`
+- Joint training → `controller/JOINT_TRAINING.md`
+- Technical analysis → `controller/ANALYSIS.md`
 
 ### I Want to Run Core Experiments
 👉 See `core_exp/` directory (**🆕 New experimental framework**)

@@ -1,8 +1,8 @@
 # Controller设计文档（统一版）
 
 > **文档状态**: 本文档整合了所有controller设计文档，基于现有代码实现和SIGMETRICS标准。
-> **最后更新**: 2026-01-01
-> **版本**: 2.0
+> **最后更新**: 2026-01-10
+> **版本**: 3.0 (Joint Training Only)
 
 ## 目录
 
@@ -45,9 +45,9 @@
 
 | Knob | 控制内容 | 决策时机 | 实现方式 | 输出空间 |
 |------|---------|---------|---------|---------|
-| **Knob1** | Vision tokens tier (low/medium/high) | Before vision encoder | Stage 1 predictor | 3 choices |
-| **Knob2** | MoE top-K (4/6/8/10/12) | After vision encoder | Stage 2 predictor | 5 choices |
-| **Knob3** | Transformer blocks count (8/10/12/14/16) | After vision encoder | **Importance-based pruning** (top-N) | 5 choices |
+| **Knob1** | Vision tokens tier (low/medium/high) + Insertion Position (1-5) | Before vision encoder | Stage 1 predictor | 3 tiers × 5 positions |
+| **Knob2** | MoE top-K (4/5/6/7/8) | After insertion position | Stage 2 predictor | 5 choices |
+| **Knob3** | Transformer blocks count (12/13/14/15/16 total blocks) | After insertion position | **Importance-based pruning** | 5 choices |
 
 **关键改进**：
 - Knob3从mask预测（2^16）简化为num_blocks预测（5），基于预计算的importance score
@@ -76,57 +76,66 @@
     ↓
 2. Stage 1: Predict Knob1
    - Extract: Language Feature (from prompt)
-   - Extract: Budget Feature
-   - Predict: Vision Tokens Tier (low/medium/high)
+   - Extract: Budget Token (encoded as d_model-dim token, concatenated to input)
+   - Predict: Vision Tokens Tier (low/medium/high) + Insertion Position (1-5)
    - Overhead: ~0.01-0.1ms
     ↓
-3. Image Preprocessing (based on Knob1)
+3. Image Preprocessing (based on Knob1 tier)
    - Determine crop count from tier
    - Apply tiling and resize
     ↓
 4. Vision Encoding
    - Vision Encoder: Process crops
    - Projector: Map to LLM space
-   - Extract: Vision Feature (pooled) for Stage 2
     ↓
-5. Stage 2: Predict Knob2 & Knob3
-   - Extract: Vision Feature (from encoder+projector, pooled)
-   - Extract: Language Feature (from prompt)
-   - Extract: Budget Feature
-   - Predict: MoE Top-K + Transformer Blocks
+5. LLM Forward to Insertion Position
+   - Run LLM blocks up to insertion position
+   - Extract: Latency Token (last token after insertion position)
+    ↓
+6. Stage 2: Predict Knob2 & Knob3
+   - Input: Latency Token (contains budget + vision + language interaction)
+   - Predict: MoE Top-K (4/5/6/7/8) + Total Blocks (12/13/14/15/16)
    - Overhead: ~0.1ms
     ↓
-6. Apply Knobs to LLM
-   - Set top_k for MoE layers (zero overhead, attribute modification)
+7. Apply Knobs to Remaining LLM Blocks
+   - Set top_k for blocks after insertion position (zero overhead, attribute modification)
    - Select blocks by importance (deterministic, O(n log n))
-   - Apply block mask
+   - First block fixed: top_k=8, always included
     ↓
-7. LLM Forward (with adaptive knobs)
+8. LLM Forward (with adaptive knobs)
+   - Prefill: Generate with all knobs applied
+   - Decode: Use prefill configuration (no controller re-run)
    - Generate output
 ```
 
-### 2.3 训练时流程（RL方法）
+### 2.3 训练时流程（Joint GRPO Training）
 
 ```
 1. Controller predicts knob configuration
-   - Stage 1: Predict Knob1 (tier)
-   - Process images with Knob1
+   - Stage 1: Predict Knob1 (tier + insertion position)
+   - Process images with Knob1 tier
    - Vision encoding
-   - Stage 2: Predict Knob2 & Knob3
+   - Run LLM to insertion position, extract latency token
+   - Stage 2: Predict Knob2 & Knob3 (based on latency token)
     ↓
-2. Estimate latency (using Latency Estimator)
-   - Input: knob configuration + token counts
-   - Output: Estimated latency (enables large batch size)
-    ↓
-3. Execute model (real execution)
+2. Execute model (real execution, batch_size=1 per sample)
    - Use predicted knobs
-   - Get accuracy (can use large batch size)
+   - Measure actual latency using hooks (prefill + decode)
+   - Get accuracy from model output
     ↓
-4. Compute reward
-   - accuracy + latency constraints
+3. Compute reward
+   - accuracy + latency constraints + budget violation penalty
     ↓
-5. Update controller (GRPO)
+4. Update controller (Joint GRPO)
+   - Both Stage1 and Stage2 contribute to same reward
+   - End-to-end optimization
 ```
+
+**关键设计**:
+- **Direct Latency Measurement**: 使用PyTorch hooks直接测量latency（不使用estimator）
+- **Batch Size**: 每个样本单独处理（batch_size=1 per sample）以确保准确测量
+- **Budget Token**: 在prefill阶段编码为token并拼接到输入序列
+- **Decode Phase**: 使用prefill阶段决定的配置，不重新运行controller
 
 ---
 
@@ -140,18 +149,19 @@
 ├─────────────────────────────────────────────────────────────┤
 │                                                              │
 │  Stage 1: Knob1 Prediction (BEFORE Vision Encoder)        │
-│  ├─ Input: Language Feature + Budget Feature               │
+│  ├─ Input: Language Feature + Budget Token (encoded)      │
 │  ├─ Network: Lightweight MLP                               │
-│  └─ Output: Vision Tokens Tier (low/medium/high)           │
+│  └─ Output: Tier (low/medium/high) + Insertion Position (1-5)│
 │                                                              │
-│  ↓ Image Preprocessing (based on Knob1)                   │
+│  ↓ Image Preprocessing (based on Knob1 tier)              │
 │  ↓ Vision Encoder + Projector                              │
+│  ↓ LLM Forward to Insertion Position                       │
+│  ↓ Extract Latency Token                                   │
 │                                                              │
-│  Stage 2: Knob2 & Knob3 Prediction (AFTER Projector)       │
-│  ├─ Input: Vision Feature (encoder+projector后) +            │
-│  │        Language Feature + Budget Feature                │
-│  ├─ Network: Lightweight MLP (recommended)                │
-│  └─ Output: MoE Top-K + Transformer Blocks                 │
+│  Stage 2: Knob2 & Knob3 Prediction (AFTER Insertion)       │
+│  ├─ Input: Latency Token (from LLM)                        │
+│  ├─ Network: Lightweight MLP                               │
+│  └─ Output: Top-K (4/5/6/7/8) + Total Blocks (12-16)      │
 │                                                              │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -189,27 +199,32 @@
   - 缓存global crop的vision feature
   - 使用知识蒸馏训练小模型
 
-**当前代码实现**: 选项B（`two_stage_controller.py`）
+**当前代码实现**: 选项B（`controller.py`中的`Knob1PredictorBudgetLanguage`）
 
-**实施计划**: 从选项A开始，逐步增加复杂度。
+**关键改进**:
+- 同时预测tier和insertion position（Stage2插入位置）
+- Budget token编码为d_model维token，拼接到输入序列
 
 ### 3.3 Stage 2: Knob2 & Knob3 Predictor
 
-**架构**: 独立轻量级MLP（推荐）
+**架构**: 独立轻量级MLP
 
 ```python
-Vision Feature (B, d_model) + Language Feature (B, d_model) + Budget Feature (B, hidden_dim)
+Latency Token (B, d_model)  # From LLM after insertion position
     ↓
-Projections → (B, hidden_dim) each
+Projection → (B, hidden_dim)
     ↓
-Fusion (concat + MLP) → (B, hidden_dim)
+Fusion MLP → (B, hidden_dim)
     ↓
-Two Heads → (B, 5) each [top_k: 4,6,8,10,12] [blocks: 8,10,12,14,16]
+Two Heads → (B, 5) each [top_k: 4,5,6,7,8] [blocks: 12,13,14,15,16]
 ```
 
-**参数量**: ~50K-200K parameters（取决于hidden_dim）
+**参数量**: ~10K-30K parameters（轻量级设计）
 
-**备选方案**: 使用LLM前几层（不推荐，overhead大）
+**关键设计**:
+- **只使用Latency Token**: 已经包含budget、vision和language的交互信息
+- **动态插入位置**: Stage1预测插入位置（1-5），Stage2在插入位置之后运行
+- **动态Knob3选项**: 根据插入位置动态调整可选的block数量
 
 ---
 
@@ -235,7 +250,11 @@ Two Heads → (B, 5) each [top_k: 4,6,8,10,12] [blocks: 8,10,12,14,16]
 
 **实现方式**: Stage 2 predictor
 
-**输出**: 5个选择（4, 6, 8, 10, 12）
+**输出**: 5个选择（4, 5, 6, 7, 8）
+
+**关键约束**:
+- 第一层固定top_k=8（总是包含）
+- 只应用于插入位置之后的blocks
 
 **应用方式**: 直接修改`block.mlp.top_k`属性（零overhead）
 
@@ -247,7 +266,12 @@ Two Heads → (B, 5) each [top_k: 4,6,8,10,12] [blocks: 8,10,12,14,16]
 
 **实现方式**: Importance-based pruning
 
-**输出**: 5个选择（8, 10, 12, 14, 16 blocks）
+**输出**: 5个选择（12, 13, 14, 15, 16 total blocks）
+
+**关键设计**:
+- **Total Blocks**: 值表示总block数（包括第一层和插入位置之前的blocks）
+- **动态选项**: 根据插入位置动态调整可选范围
+- **第一层固定**: 总是包含第一层（top_k=8）
 
 **Importance Score理解**:
 - **Data-Agnostic**: Importance score与数据来源无关（coco vqa和text vqa的importance score接近）
@@ -303,13 +327,12 @@ apply_block_mask(model, selected_blocks)
 
 | 特征 | 提取方式 | 维度 | 说明 |
 |------|---------|------|------|
-| Vision | Encoder + Projector + Mean pooling | (B, d_model) | **必须经过projector** |
-| Language | Tokenizer + WTE + Mean pooling | (B, d_model) | 从prompt提取 |
-| Budget | MLP encoder | (B, hidden_dim) | 从latency budget编码 |
+| Latency Token | LLM after insertion position | (B, d_model) | **最后一个token**（包含budget+vision+language交互） |
 
 **关键点**：
-- ✅ **Vision feature必须经过projector**：因为Stage 2在vision encoder+projector之后
-- ✅ 使用mean pooling获得固定长度特征
+- ✅ **只使用Latency Token**: 已经包含所有必要信息（budget token + vision + language经过attention）
+- ✅ **提取位置**: 在插入位置之后的block输出中提取最后一个token
+- ✅ **信息完整性**: Latency token已经包含了budget、vision和language的交互信息
 
 ---
 
@@ -323,42 +346,45 @@ apply_block_mask(model, selected_blocks)
 | **Supervised** | 低 | 快 | 高 | 中等 | ⭐⭐⭐⭐ Baseline |
 | **GRPO** | 低 | 中等 | **最高** | 高 | ⭐⭐⭐⭐⭐ **推荐** |
 
-### 6.2 推荐方案：两阶段训练
+### 6.2 推荐方案：Joint Training（唯一训练方式）
 
-**Stage 1: Supervised Learning**
-- **数据来源**: Core experiment JSON文件
-- **训练目标**: 学习latency_budget → tier映射
-- **优点**: 简单稳定，训练快
-
-**Stage 2: GRPO (Online Training)**
-- **数据来源**: Online execution + Latency Estimator
+**Joint GRPO Training**:
+- **数据来源**: Online execution（实际数据集样本）
 - **训练目标**: 学习accuracy-latency trade-off
-- **优点**: 高效样本利用，可以学习复杂约束
-- **关键组件**: Latency Estimator（避免batch_size=1限制）
+- **优点**: 高效样本利用，可以学习复杂约束，端到端优化
+- **关键特点**: 
+  - Stage1和Stage2一起训练，共享reward信号
+  - 使用direct latency measurement（hooks）
+  - Batch size = 1 per sample（确保准确测量）
 
-### 6.3 Latency Estimator
+**训练流程**:
+1. 从实际数据集加载样本（image + prompt）
+2. 随机采样latency budget（170-380ms）
+3. Stage1预测tier和insertion position
+4. 运行vision encoder（基于tier）
+5. 运行LLM到insertion position，提取latency token
+6. Stage2预测top_k和num_blocks
+7. 执行完整模型，测量实际latency（hooks）
+8. 计算accuracy和reward
+9. Joint GRPO loss更新两个controller
+
+**关键设计**:
+- **Direct Measurement**: 使用PyTorch hooks直接测量prefill和decode latency
+- **Budget Token**: 编码为d_model维token，在prefill阶段拼接到输入序列
+- **Decode Phase**: 使用prefill配置，不重新运行controller
+
+### 6.3 Latency Estimator（独立模块，可选）
+
+**注意**: Latency Estimator作为独立模块保留，但**当前controller训练不使用**。
 
 **设计**: 轻量级MLP（2-3层）
 
-**输入特征**:
-```python
-features = [
-    vision_tokens,      # Number of vision tokens
-    text_tokens,        # Number of text tokens
-    output_tokens,      # Expected number of output tokens
-    tier_idx,           # Tier index (0=low, 1=medium, 2=high)
-    top_k,              # MoE top-K value
-    num_active_blocks,  # Number of active transformer blocks
-]
-```
+**用途**: 
+- 可以用于快速latency预估（不用于controller训练）
+- 可以用于configuration搜索和优化
+- 可以用于不同硬件的latency预测
 
-**输出预测**: 阶段分解
-- T_vision_encoder
-- T_projector
-- T_LLM_prefill
-- T_LLM_decode_per_token
-
-**用途**: 在RL训练中预估latency，避免batch_size=1限制
+**详细信息**: 参见`LATENCY_ESTIMATOR_DESIGN.md`（独立文档）
 
 ---
 
@@ -495,14 +521,16 @@ experiments/controller/
 - 确定性选择，稳定可靠
 - 数据无关（基于预计算的importance）
 
-### 10.3 训练方法: GRPO
+### 10.3 训练方法: Joint GRPO
 
-**决策**: 使用GRPO进行Stage 2训练
+**决策**: 使用Joint GRPO同时训练Stage1和Stage2
 
 **理由**:
 - Critic-free，训练快
 - 高效样本利用
 - 可以学习复杂的accuracy-latency trade-off
+- 两个阶段共享reward，端到端优化
+- 可以协调两个阶段的决策
 
 ### 10.4 AdaLoRA-Inspired设计（两种思路）
 
@@ -573,9 +601,11 @@ Single Stage: All Knobs (After Vision Encoder)
 
 ### B. 代码实现
 
-- `experiments/controller/two_stage_controller.py`: 两阶段controller实现（思路1）
-- `experiments/controller/minimal_controller.py`: 最小overhead controller
+- `experiments/controller/controller.py`: Controller实现（Stage1和Stage2）
+- `experiments/controller/joint_grpo_trainer.py`: Joint GRPO训练器
+- `experiments/controller/train_joint_controller.py`: 主训练脚本
 - `experiments/controller/importance_based_block_selection.py`: Block selection工具
+- `experiments/controller/model_forward_with_dynamic_stage2.py`: 动态forward pass
 
 ### C. 外部资源
 
