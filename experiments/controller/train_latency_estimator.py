@@ -45,17 +45,52 @@ class LatencyEstimatorDataset(Dataset):
         tier_map = {'low': 0, 'medium': 1, 'high': 2}
         tier_idx = tier_map.get(tier.lower(), 1)
         
+        # Compute T_prefill_total = T_vision_total + T_LLM_prefill
+        T_vision_total = sample.get('T_vision_total', 0.0)
+        T_LLM_prefill = sample.get('T_LLM_prefill', 0.0)
+        T_prefill_total = T_vision_total + T_LLM_prefill
+        
+        # Get decode latency information
+        T_LLM_decode = sample.get('T_LLM_decode', 0.0)
+        output_tokens = sample.get('output_tokens', 1)
+        
+        # Check if we have positioned decode latency data (T_decode_per_step)
+        # This is available in newer profiling experiments
+        T_decode_per_step = sample.get('T_decode_per_step', [])
+        has_positioned_data = len(T_decode_per_step) > 0
+        
+        if has_positioned_data:
+            # Use actual positioned decode latency data
+            # T_decode_per_step is a list of lists: [position][run]
+            # We'll use the mean across runs for each position
+            positioned_latencies = []
+            for pos_times in T_decode_per_step:
+                if len(pos_times) > 0:
+                    positioned_latencies.append(float(np.mean(pos_times)))
+                else:
+                    positioned_latencies.append(0.0)
+            
+            # Store as list for training (will be used to compute total decode latency)
+            positioned_decode_latencies = positioned_latencies
+            T_decode_per_token_avg = T_LLM_decode / max(output_tokens, 1)  # For backward compatibility
+        else:
+            # No positioned data: use average per-token latency
+            # During training, we'll predict positioned latencies and sum them to match T_LLM_decode
+            T_decode_per_token_avg = T_LLM_decode / max(output_tokens, 1)
+            positioned_decode_latencies = []  # Empty means we need to predict and sum
+        
         return {
             'vision_tokens': torch.tensor(sample.get('vision_tokens', 0), dtype=torch.long),
             'text_tokens': torch.tensor(sample.get('text_tokens', 0), dtype=torch.long),
-            'output_tokens': torch.tensor(sample.get('output_tokens', 0), dtype=torch.long),
             'tier_idx': torch.tensor(tier_idx, dtype=torch.long),
             'top_k': torch.tensor(sample.get('top_k', 8), dtype=torch.long),
             'num_active_blocks': torch.tensor(sample.get('num_active_blocks', 16), dtype=torch.long),
-            'T_vision_total': torch.tensor(sample.get('T_vision_total', 0.0), dtype=torch.float32),
-            'T_LLM_prefill': torch.tensor(sample.get('T_LLM_prefill', 0.0), dtype=torch.float32),
-            'T_LLM_decode': torch.tensor(sample.get('T_LLM_decode', 0.0), dtype=torch.float32),
-            'T_total': torch.tensor(sample.get('T_total', 0.0), dtype=torch.float32),
+            'output_tokens': torch.tensor(output_tokens, dtype=torch.long),  # Needed for training
+            'T_prefill_total': torch.tensor(T_prefill_total, dtype=torch.float32),
+            'T_LLM_decode': torch.tensor(T_LLM_decode, dtype=torch.float32),  # Total decode latency (target)
+            'T_decode_per_token_avg': torch.tensor(T_decode_per_token_avg, dtype=torch.float32),  # Average (for reference)
+            'positioned_decode_latencies': positioned_decode_latencies,  # List of positioned latencies (if available)
+            'has_positioned_data': has_positioned_data,  # Flag indicating if positioned data is available
         }
 
 
@@ -85,14 +120,33 @@ def prepare_training_data(
     
     # Filter valid samples
     valid_samples = []
+    filtered_outliers = 0
     for sample in samples:
         # Check required fields
+        T_vision_total = sample.get('T_vision_total', 0.0)
+        T_LLM_prefill = sample.get('T_LLM_prefill', 0.0)
+        T_LLM_decode = sample.get('T_LLM_decode', 0.0)
+        output_tokens = sample.get('output_tokens', 1)
+        
+        # Calculate decode per-token latency
+        decode_per_token = T_LLM_decode / max(output_tokens, 1)
+        
+        # Filter out outliers: decode per-token latency > 60ms/token
+        if decode_per_token > 60.0:
+            filtered_outliers += 1
+            continue
+        
         if (sample.get('vision_tokens', 0) > 0 and
             sample.get('text_tokens', 0) > 0 and
-            sample.get('T_total', 0) > 0):
+            T_vision_total > 0 and
+            T_LLM_prefill > 0 and
+            T_LLM_decode > 0 and
+            output_tokens > 0):
             valid_samples.append(sample)
     
     log.info(f"Found {len(valid_samples)} valid samples")
+    if filtered_outliers > 0:
+        log.info(f"Filtered out {filtered_outliers} outliers (decode per-token latency > 60ms/token)")
     
     # Limit samples if needed
     if max_samples and len(valid_samples) > max_samples:
@@ -167,7 +221,6 @@ def train_latency_estimator(
     model = LatencyEstimator(
         hidden_dim=256,
         num_layers=2,
-        use_output_tokens=True,
     )
     
     # Create trainer
@@ -188,8 +241,10 @@ def train_latency_estimator(
         model.train()
         train_metrics = {
             'loss': [],
-            'mae_total': [],
-            'rel_error_total': [],
+            'mae_prefill': [],
+            'mae_decode_total': [],
+            'rel_error_prefill': [],
+            'rel_error_decode_total': [],
         }
         
         pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs}")
@@ -202,7 +257,8 @@ def train_latency_estimator(
             
             pbar.set_postfix({
                 'loss': f"{metrics['loss']:.4f}",
-                'mae': f"{metrics['mae_total']:.2f}ms",
+                'prefill_mae': f"{metrics['mae_prefill']:.2f}ms",
+                'decode_total_mae': f"{metrics['mae_decode_total']:.2f}ms",
             })
         
         avg_train_metrics = {k: np.mean(v) for k, v in train_metrics.items() if v}
@@ -253,8 +309,13 @@ def main():
         "--dataset_names",
         type=str,
         nargs="+",
-        default=["text_vqa", "coco_2014_vqa"],
-        help="Dataset names to load"
+        default=None,
+        help="Dataset names to load (e.g., text_vqa coco_2014_vqa). If not specified, will auto-detect all available datasets"
+    )
+    parser.add_argument(
+        "--use_all_datasets",
+        action="store_true",
+        help="Use all available datasets in results_dir (auto-detects, ignores --dataset_names)"
     )
     parser.add_argument(
         "--output_dir",
@@ -301,11 +362,34 @@ def main():
     parser.add_argument(
         "--seed",
         type=int,
-        default=42,
+        default=3407,
         help="Random seed"
     )
     
     args = parser.parse_args()
+    
+    # Auto-detect datasets if needed
+    if args.use_all_datasets or args.dataset_names is None:
+        log.info("Auto-detecting available datasets...")
+        results_path = Path(args.results_dir)
+        available_datasets = []
+        
+        for item in results_path.iterdir():
+            if item.is_dir() and item.name != "logs":
+                # Check if it contains JSON files
+                json_files = list(item.glob("*.json"))
+                if json_files:
+                    # Convert directory name to dataset name (e.g., "text-vqa" -> "text_vqa")
+                    dataset_name = item.name.replace("-", "_")
+                    available_datasets.append(dataset_name)
+        
+        if available_datasets:
+            args.dataset_names = sorted(available_datasets)
+            log.info(f"Found {len(args.dataset_names)} datasets: {', '.join(args.dataset_names)}")
+        else:
+            raise ValueError(f"No datasets found in {args.results_dir}")
+    else:
+        log.info(f"Using specified datasets: {', '.join(args.dataset_names)}")
     
     # Prepare data
     training_data = prepare_training_data(

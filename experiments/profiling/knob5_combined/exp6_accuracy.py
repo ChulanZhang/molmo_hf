@@ -634,7 +634,33 @@ class Exp6LatencyExperiment(BaseExperiment):
                                 start_hook_handle = transformer.blocks[0].register_forward_hook(prefill_start_hook)
                                 end_hook_handle = transformer.blocks[-1].register_forward_hook(prefill_end_hook)
                             
+                            # Track decode time directly (not by subtraction)
+                            # This is more accurate and avoids measurement errors
+                            forward_count = 0
+                            decode_start_time = None
+                            original_forward = self.model.model.forward
+                            
+                            def tracked_forward(*args, **kwargs):
+                                nonlocal forward_count, decode_start_time
+                                is_prefill = forward_count == 0
+                                
+                                # Record decode start time (first decode step)
+                                if not is_prefill and decode_start_time is None:
+                                    if self.device.type == 'cuda':
+                                        torch.cuda.synchronize(self.device)
+                                    decode_start_time = time.perf_counter()
+                                
+                                # Call original forward
+                                output = original_forward(*args, **kwargs)
+                                
+                                # Increment forward count after prefill
+                                if is_prefill:
+                                    forward_count += 1
+                                
+                                return output
+                            
                             # Measure total time (includes vision + prefill + decode)
+                            self.model.model.forward = tracked_forward
                             if self.device.type == 'cuda':
                                 torch.cuda.synchronize(self.device)
                             total_start_time = time.perf_counter()
@@ -654,6 +680,18 @@ class Exp6LatencyExperiment(BaseExperiment):
                             total_end_time = time.perf_counter()
                             T_total = (total_end_time - total_start_time) * 1000  # Convert to ms
                             
+                            # Measure decode end time (after all decode steps complete)
+                            if decode_start_time is not None:
+                                if self.device.type == 'cuda':
+                                    torch.cuda.synchronize(self.device)
+                                decode_end_time = time.perf_counter()
+                                T_decode = (decode_end_time - decode_start_time) * 1000  # Direct measurement
+                            else:
+                                T_decode = 0.0  # No decode happened
+                            
+                            # Restore original forward
+                            self.model.model.forward = original_forward
+                            
                             # Remove hooks
                             if start_hook_handle is not None:
                                 start_hook_handle.remove()
@@ -662,11 +700,8 @@ class Exp6LatencyExperiment(BaseExperiment):
                             
                             # Extract latencies
                             T_prefill = llm_prefill_time if llm_prefill_time is not None else 0.0
-                            # Decode = Total - Prefill (we don't separate vision, so this includes vision in decode)
-                            # But for LLM decode, we approximate: Total - Prefill ≈ Vision + Decode
-                            # Since we only care about LLM decode, we use: Decode ≈ Total - Prefill
-                            # (This is an approximation, but vision time is typically small compared to decode)
-                            T_decode = max(0.0, T_total - T_prefill)
+                            # T_decode is now directly measured, not calculated by subtraction
+                            # This avoids measurement errors from subtraction method
                             
                             # Count vision tokens (same method as motivation experiments)
                             if "image_input_idx" in batch and batch["image_input_idx"] is not None:

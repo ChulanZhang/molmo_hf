@@ -226,13 +226,15 @@ def main():
     # Tier-based vision token control
     # tier_list = ["low", "medium", "high"]  # Available: "low", "medium", "high"
     tier_list = ["low", "medium", "high"]  # Available: "low", "medium", "high"
-    top_k_list = [4, 6, 8]  # MoE top-k values
+    # top_k_list = [4, 6, 8]  # MoE top-k values
+    top_k_list = [5, 7]  # MoE top-k values
     # Number of active transformer blocks (EXP3 recommended configurations)
     # 12 blocks: Remove Block 2, 4, 10, 13 (18.36% accuracy drop)
     # 14 blocks: Remove Block 4, 13 (5.41% accuracy drop) - RECOMMENDED
     # 15 blocks: Remove Block 4 (3.09% accuracy drop)
     # 16 blocks: No removal (baseline)
-    num_active_blocks_list = [12, 14, 16]  # Number of active transformer blocks
+    #num_active_blocks_list = [12, 14, 16]  # Number of active transformer blocks
+    num_active_blocks_list = [13, 15]  # Number of active transformer blocks
     
     # Auto-detect number of GPUs (can be overridden with NUM_GPUS_OVERRIDE env var)
     num_gpus = detect_num_gpus()
