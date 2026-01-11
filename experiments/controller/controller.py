@@ -262,9 +262,9 @@ class Knob2Knob3Predictor(nn.Module):
     """
     Stage2 Controller: Predicts top-K and total blocks after insertion position.
     
-    Input: 
-        - Latency Token (d_model-dim): Extracted from LLM after insertion position
-        - Insertion Position (1-5): Where Stage2 is inserted
+    Input (two modes):
+        Mode A (latency_token): Latency Token (d_model-dim) extracted from LLM after insertion position
+        Mode B (optimized): lang_feat + budget_feat + insertion_position embedding (no partial forward needed)
     
     Output:
         - Top-K (4/5/6/7/8): MoE top-K for blocks after insertion position
@@ -273,7 +273,8 @@ class Knob2Knob3Predictor(nn.Module):
     Design: Lightweight MLP (~10K-30K params)
     
     Key design:
-    - Only uses latency token (contains budget + vision + language interaction)
+    - Supports two input modes for flexibility
+    - Mode B (optimized) allows joint sampling before forward pass (5 forward passes instead of 10)
     - Dynamic knob3 options based on insertion position
     - First block fixed: top_k=8, always included
     """
@@ -281,21 +282,53 @@ class Knob2Knob3Predictor(nn.Module):
     def __init__(
         self,
         latency_token_dim: int = 2048,  # d_model from transformer
+        lang_feat_dim: int = 2048,  # d_model for language features
+        budget_feat_dim: int = 2048,  # d_model for budget features
         hidden_dim: int = 128,
         dropout: float = 0.1,
         max_insertion_position: int = 5,  # Maximum insertion position
         total_blocks: int = 16,  # Total transformer blocks
+        use_optimized_mode: bool = True,  # If True, use lang_feat+budget_feat instead of latency_token
     ):
         super().__init__()
         
-        # Lightweight projection (only latency token, no budget_feat needed)
-        self.latency_token_proj = nn.Sequential(
-            nn.Linear(latency_token_dim, hidden_dim),
-            nn.ReLU(),
-            nn.LayerNorm(hidden_dim),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, hidden_dim),
-        )
+        self.use_optimized_mode = use_optimized_mode
+        
+        if use_optimized_mode:
+            # Mode B: lang_feat + budget_feat + insertion_position embedding
+            self.lang_proj = nn.Sequential(
+                nn.Linear(lang_feat_dim, hidden_dim),
+                nn.ReLU(),
+                nn.LayerNorm(hidden_dim),
+                nn.Dropout(dropout),
+            )
+            self.budget_proj = nn.Sequential(
+                nn.Linear(budget_feat_dim, hidden_dim),
+                nn.ReLU(),
+                nn.LayerNorm(hidden_dim),
+                nn.Dropout(dropout),
+            )
+            # Insertion position embedding (1-5 -> embedding)
+            self.insertion_embedding = nn.Embedding(max_insertion_position, hidden_dim)
+            
+            # Fusion layer
+            self.fusion = nn.Sequential(
+                nn.Linear(hidden_dim * 3, hidden_dim * 2),
+                nn.ReLU(),
+                nn.LayerNorm(hidden_dim * 2),
+                nn.Dropout(dropout),
+                nn.Linear(hidden_dim * 2, hidden_dim),
+                nn.LayerNorm(hidden_dim),
+            )
+        else:
+            # Mode A: latency_token only
+            self.latency_token_proj = nn.Sequential(
+                nn.Linear(latency_token_dim, hidden_dim),
+                nn.ReLU(),
+                nn.LayerNorm(hidden_dim),
+                nn.Dropout(dropout),
+                nn.Linear(hidden_dim, hidden_dim),
+            )
         
         # Dynamic heads: will be created based on insertion position
         # For now, create heads for max possible options
@@ -343,14 +376,18 @@ class Knob2Knob3Predictor(nn.Module):
     
     def forward(
         self,
-        latency_token: torch.Tensor,  # (B, latency_token_dim) - from transformer block after insertion
-        insertion_position: torch.Tensor,  # (B,) insertion position (1-5)
+        latency_token: Optional[torch.Tensor] = None,  # (B, latency_token_dim) - Mode A
+        insertion_position: torch.Tensor = None,  # (B,) insertion position (1-5)
+        lang_feat: Optional[torch.Tensor] = None,  # (B, lang_feat_dim) - Mode B
+        budget_feat: Optional[torch.Tensor] = None,  # (B, budget_feat_dim) - Mode B
     ) -> Dict[str, torch.Tensor]:
         """
         Predict Knob2 and Knob3 based on insertion position.
         
-        Note: latency_token already contains budget information (budget was encoded as a token
-        and concatenated to the sequence, then processed through transformer blocks).
+        Supports two modes:
+        - Mode A (latency_token): Uses latency token extracted from LLM after insertion position
+        - Mode B (optimized): Uses lang_feat + budget_feat + insertion_position embedding
+                              (allows joint sampling before forward pass, reducing from 10 to 5 forward passes)
         
         Returns:
             {
@@ -358,8 +395,23 @@ class Knob2Knob3Predictor(nn.Module):
                 'knob3_logits': (B, num_options),  # num_options depends on insertion_position
             }
         """
-        # Project latency token (which already contains budget + vision + language info)
-        fused = self.latency_token_proj(latency_token)
+        if self.use_optimized_mode and lang_feat is not None and budget_feat is not None:
+            # Mode B: lang_feat + budget_feat + insertion_position embedding
+            lang_proj = self.lang_proj(lang_feat)  # (B, hidden_dim)
+            budget_proj = self.budget_proj(budget_feat)  # (B, hidden_dim)
+            
+            # Insertion position embedding (convert 1-5 to 0-4 for embedding)
+            insertion_idx = insertion_position - 1  # (B,) convert 1-5 to 0-4
+            insertion_emb = self.insertion_embedding(insertion_idx)  # (B, hidden_dim)
+            
+            # Fuse features
+            fused = torch.cat([lang_proj, budget_proj, insertion_emb], dim=-1)  # (B, hidden_dim * 3)
+            fused = self.fusion(fused)  # (B, hidden_dim)
+        else:
+            # Mode A: latency_token only
+            if latency_token is None:
+                raise ValueError("latency_token must be provided in Mode A")
+            fused = self.latency_token_proj(latency_token)  # (B, hidden_dim)
         
         # Predict knob2 (same for all positions)
         knob2_logits = self.knob2_head(fused)  # (B, 5)
@@ -656,5 +708,84 @@ class TwoStageController(nn.Module):
             'knob1': sum(p.numel() for p in self.knob1_predictor.parameters()),
             'knob2_knob3': sum(p.numel() for p in self.knob2_knob3_predictor.parameters()),
             'total': sum(p.numel() for p in self.parameters()),
+        }
+
+# ---------------- One-Stage Controller ----------------
+
+class OneStageControllerPredictor(nn.Module):
+    """
+    One-stage controller (no insertion position):
+      - Predicts tier (Knob1)
+      - Predicts block activation scores (for blocks 1-15; block0 always on)
+      - Predicts per-block top-k logits (for blocks 0-15)
+    """
+    def __init__(
+        self,
+        vision_dim: int = 768,
+        lang_dim: int = 2048,
+        budget_dim: int = 2048,
+        hidden_dim: int = 256,
+        dropout: float = 0.1,
+        total_blocks: int = 16,
+    ):
+        super().__init__()
+        self.total_blocks = total_blocks
+        self.tier_values = ["low", "medium", "high"]
+        self.topk_choices = [4, 5, 6, 7, 8]
+        
+        self.vision_proj = nn.Sequential(
+            nn.Linear(vision_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+        )
+        self.lang_proj = nn.Sequential(
+            nn.Linear(lang_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+        )
+        self.budget_proj = nn.Sequential(
+            nn.Linear(budget_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+        )
+        
+        self.fusion = nn.Sequential(
+            nn.Linear(hidden_dim * 3, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, hidden_dim),
+        )
+        
+        self.tier_head = nn.Linear(hidden_dim, 3)  # low/medium/high
+        # block logits for blocks 1-15 (block0 always on)
+        self.block_head = nn.Linear(hidden_dim, total_blocks - 1)
+        # per-block topk logits (16 blocks, each 5 options)
+        self.block_topk_head = nn.Linear(hidden_dim, total_blocks * len(self.topk_choices))
+    
+    def forward(
+        self,
+        vision_feat: torch.Tensor,  # (B, vision_dim)
+        lang_feat: torch.Tensor,    # (B, lang_dim)
+        budget_feat: torch.Tensor,  # (B, budget_dim)
+    ) -> Dict[str, torch.Tensor]:
+        v = self.vision_proj(vision_feat)
+        l = self.lang_proj(lang_feat)
+        b = self.budget_proj(budget_feat)
+        fused = self.fusion(torch.cat([v, l, b], dim=-1))
+        
+        tier_logits = self.tier_head(fused)
+        block_logits = self.block_head(fused)  # (B, 15) for blocks 1-15
+        block_topk_logits = self.block_topk_head(fused).view(
+            fused.shape[0], self.total_blocks, len(self.topk_choices)
+        )  # (B,16,5)
+        
+        return {
+            "tier_logits": tier_logits,
+            "block_logits": block_logits,
+            "block_topk_logits": block_topk_logits,
         }
 
