@@ -1,14 +1,20 @@
 """
-Two-Stage Controller for adaptive inference.
+Two-Stage Controller for adaptive inference (Joint Training).
 
-Implements the two-stage controller architecture as specified in DESIGN.md:
-- Stage 1: Predict Knob1 (vision tokens tier) before vision encoding
-- Stage 2: Predict Knob2 (MoE top-K) and Knob3 (transformer blocks) after vision encoding
+Implements the two-stage controller architecture with joint training:
+- Stage 1: Predict Knob1 (vision tokens tier + insertion position) before vision encoding
+- Stage 2: Predict Knob2 (MoE top-K) and Knob3 (transformer blocks) after insertion position
 
-Supports three Knob1 variants:
-- Variant A: Budget-Only (minimal overhead)
-- Variant B: Budget + Language (current default)
-- Variant C: Budget + Language + Vision (highest accuracy, requires optimization)
+Key design:
+- Joint Training: Both stages trained together end-to-end with shared reward
+- Dynamic Insertion: Stage1 decides where to insert Stage2 (after block 1-5)
+- Budget Token: Encoded as d_model-dim token, concatenated to input sequence
+- Latency Token: Extracted from LLM after insertion position, contains all necessary info
+- Decode Phase: Uses prefill configuration, no controller re-run
+
+Current implementation:
+- Knob1PredictorBudgetLanguage: Stage1 predictor (tier + insertion position)
+- Knob2Knob3Predictor: Stage2 predictor (top_k + num_blocks)
 """
 
 import torch
@@ -92,13 +98,19 @@ class Knob1PredictorBudgetOnly(nn.Module):
 
 class Knob1PredictorBudgetLanguage(nn.Module):
     """
-    Variant B: Budget + Language predictor (medium overhead, ~0.1ms).
+    Stage1 Controller: Predicts tier and insertion position.
     
-    Input: Language feature + Budget feature
-    Output: Tier prediction (low/medium/high)
+    Input: 
+        - Language Feature (d_model-dim): From prompt via WTE layer
+        - Budget Feature (d_model-dim): From budget token (encoded)
     
-    Design: Lightweight MLP (~50K params)
-    Can be enhanced with Semantic Router integration.
+    Output:
+        - Tier (low/medium/high): Vision tokens tier
+        - Insertion Position (1-5): Where to insert Stage2 controller
+    
+    Design: Lightweight MLP (~50K-100K params)
+    - Two heads: tier prediction + insertion position prediction
+    - Budget feature is d_model dimension (from budget token)
     """
     
     def __init__(
@@ -107,6 +119,7 @@ class Knob1PredictorBudgetLanguage(nn.Module):
         budget_feat_dim: int = 256,
         hidden_dim: int = 256,
         dropout: float = 0.1,
+        max_insertion_position: int = 5,  # Maximum insertion position (1-5 means after block 1-5)
     ):
         super().__init__()
         
@@ -132,20 +145,28 @@ class Knob1PredictorBudgetLanguage(nn.Module):
             nn.Linear(hidden_dim, hidden_dim),
         )
         
-        self.head = nn.Linear(hidden_dim, 3)  # low, medium, high
+        # Tier prediction head
+        self.tier_head = nn.Linear(hidden_dim, 3)  # low, medium, high
+        
+        # Insertion position prediction head
+        self.insertion_head = nn.Linear(hidden_dim, max_insertion_position)  # 1-5 (after block 1-5)
         
         self.tier_values = ["low", "medium", "high"]
+        self.max_insertion_position = max_insertion_position
     
     def forward(
         self,
         lang_feat: torch.Tensor,  # (B, lang_feat_dim)
         budget_feat: torch.Tensor,  # (B, budget_feat_dim)
-    ) -> torch.Tensor:
+    ) -> Dict[str, torch.Tensor]:
         """
-        Predict tier from language + budget.
+        Predict tier and insertion position from language + budget.
         
         Returns:
-            logits: (B, 3) logits for [low, medium, high]
+            {
+                'tier_logits': (B, 3) logits for [low, medium, high],
+                'insertion_logits': (B, max_insertion_position) logits for insertion position
+            }
         """
         lang_proj = self.lang_proj(lang_feat)
         budget_proj = self.budget_proj(budget_feat)
@@ -153,7 +174,10 @@ class Knob1PredictorBudgetLanguage(nn.Module):
         fused = torch.cat([lang_proj, budget_proj], dim=-1)
         hidden = self.fusion(fused)
         
-        return self.head(hidden)
+        return {
+            'tier_logits': self.tier_head(hidden),
+            'insertion_logits': self.insertion_head(hidden),
+        }
 
 
 class Knob1PredictorBudgetLanguageVision(nn.Module):
@@ -236,71 +260,123 @@ class Knob1PredictorBudgetLanguageVision(nn.Module):
 
 class Knob2Knob3Predictor(nn.Module):
     """
-    Stage 2: Predict MoE top-K and transformer blocks after vision encoding.
+    Stage2 Controller: Predicts top-K and total blocks after insertion position.
     
-    Input: Vision feature (after encoder+projector) + Language feature + Budget feature
-    Output: Top-K prediction + Blocks prediction
+    Input: 
+        - Latency Token (d_model-dim): Extracted from LLM after insertion position
+        - Insertion Position (1-5): Where Stage2 is inserted
     
-    Design: Lightweight MLP (~50K-200K params)
+    Output:
+        - Top-K (4/5/6/7/8): MoE top-K for blocks after insertion position
+        - Total Blocks (12/13/14/15/16): Total active blocks (including first block)
+    
+    Design: Lightweight MLP (~10K-30K params)
+    
+    Key design:
+    - Only uses latency token (contains budget + vision + language interaction)
+    - Dynamic knob3 options based on insertion position
+    - First block fixed: top_k=8, always included
     """
     
     def __init__(
         self,
-        vision_feat_dim: int = 2048,  # After projector, d_model
-        lang_feat_dim: int = 2048,
-        budget_feat_dim: int = 256,
+        latency_token_dim: int = 2048,  # d_model from transformer
         hidden_dim: int = 128,
         dropout: float = 0.1,
+        max_insertion_position: int = 5,  # Maximum insertion position
+        total_blocks: int = 16,  # Total transformer blocks
     ):
         super().__init__()
         
-        # Lightweight projections
-        self.vision_proj = nn.Linear(vision_feat_dim, hidden_dim)
-        self.lang_proj = nn.Linear(lang_feat_dim, hidden_dim)
-        self.budget_proj = nn.Linear(budget_feat_dim, hidden_dim)
-        
-        # Small fusion network
-        self.fusion = nn.Sequential(
-            nn.Linear(hidden_dim * 3, hidden_dim),
+        # Lightweight projection (only latency token, no budget_feat needed)
+        self.latency_token_proj = nn.Sequential(
+            nn.Linear(latency_token_dim, hidden_dim),
             nn.ReLU(),
             nn.LayerNorm(hidden_dim),
+            nn.Dropout(dropout),
             nn.Linear(hidden_dim, hidden_dim),
         )
         
-        # Two tiny heads
-        self.knob2_head = nn.Linear(hidden_dim, 5)  # top_k: 4,6,8,10,12
-        self.knob3_head = nn.Linear(hidden_dim, 5)  # num_blocks: 8,10,12,14,16
+        # Dynamic heads: will be created based on insertion position
+        # For now, create heads for max possible options
+        # knob2: top_k options (4,5,6,7,8) - same for all positions
+        # knob3: num_blocks options depend on insertion position
+        self.knob2_head = nn.Linear(hidden_dim, 5)  # top_k: 4,5,6,7,8
         
-        self.knob2_values = [4, 6, 8, 10, 12]
-        self.knob3_values = [8, 10, 12, 14, 16]
+        # knob3 head will output max possible blocks
+        # For insertion at position 1: max 15 remaining blocks -> total 16
+        # For insertion at position 5: max 11 remaining blocks -> total 12
+        # We use a fixed-size head for max possible options (5 options: 11-15 remaining blocks)
+        # This covers all insertion positions (1-5)
+        max_options = 5  # Maximum number of knob3 options across all insertion positions
+        self.knob3_head = nn.Linear(hidden_dim, max_options)
+        
+        self.knob2_values = [4, 5, 6, 7, 8]  # Top-K for blocks after insertion position
+        self.total_blocks = total_blocks
+        self.max_insertion_position = max_insertion_position
+    
+    def get_knob3_options(self, insertion_position: int) -> List[int]:
+        """
+        Get knob3 options based on insertion position.
+        
+        Args:
+            insertion_position: Position after which to insert (1-5, meaning after block 1-5)
+        
+        Returns:
+            List of total block counts (including blocks before insertion)
+        """
+        # Remaining blocks after insertion position
+        remaining_blocks = self.total_blocks - insertion_position
+        
+        # Options: keep 11-15 of remaining blocks (or fewer if remaining < 15)
+        # Total = insertion_position + selected_remaining
+        min_selected = max(11, remaining_blocks - 4)  # At least 11, or remaining-4 if remaining < 15
+        max_selected = min(15, remaining_blocks)  # At most 15, or remaining if remaining < 15
+        
+        # Generate options: [min_selected, min_selected+1, ..., max_selected]
+        options = list(range(min_selected, max_selected + 1))
+        
+        # Total blocks = insertion_position + selected_remaining
+        total_options = [insertion_position + selected for selected in options]
+        
+        return total_options
     
     def forward(
         self,
-        vision_feat: torch.Tensor,  # (B, vision_feat_dim) - after encoder+projector, pooled
-        lang_feat: torch.Tensor,     # (B, lang_feat_dim)
-        budget_feat: torch.Tensor,    # (B, budget_feat_dim)
+        latency_token: torch.Tensor,  # (B, latency_token_dim) - from transformer block after insertion
+        insertion_position: torch.Tensor,  # (B,) insertion position (1-5)
     ) -> Dict[str, torch.Tensor]:
         """
-        Predict Knob2 and Knob3.
+        Predict Knob2 and Knob3 based on insertion position.
+        
+        Note: latency_token already contains budget information (budget was encoded as a token
+        and concatenated to the sequence, then processed through transformer blocks).
         
         Returns:
             {
                 'knob2_logits': (B, 5),
-                'knob3_logits': (B, 5),
+                'knob3_logits': (B, num_options),  # num_options depends on insertion_position
             }
         """
-        # Project features
-        v = F.relu(self.vision_proj(vision_feat))
-        l = F.relu(self.lang_proj(lang_feat))
-        b = F.relu(self.budget_proj(budget_feat))
+        # Project latency token (which already contains budget + vision + language info)
+        fused = self.latency_token_proj(latency_token)
         
-        # Fuse
-        fused = self.fusion(torch.cat([v, l, b], dim=-1))
+        # Predict knob2 (same for all positions)
+        knob2_logits = self.knob2_head(fused)  # (B, 5)
         
-        # Predict
+        # Predict knob3 (dynamic based on insertion position)
+        # For simplicity, we'll use a fixed-size head and mask invalid options
+        # Or we can use a separate head per insertion position
+        # For now, use a single head and handle masking in loss computation
+        knob3_logits_base = self.knob3_head(fused)  # (B, max_options)
+        
+        # For each sample, get valid options based on insertion_position
+        # This is a bit complex, so we'll handle it in the calling code
+        # For now, return base logits and insertion_position
         return {
-            'knob2_logits': self.knob2_head(fused),
-            'knob3_logits': self.knob3_head(fused),
+            'knob2_logits': knob2_logits,
+            'knob3_logits': knob3_logits_base,  # Will be masked/selected based on insertion_position
+            'insertion_position': insertion_position,
         }
     
     def predict(
